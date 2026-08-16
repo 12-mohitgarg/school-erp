@@ -1,0 +1,119 @@
+# Local development stack for EduSphere School ERP.
+#   docker compose -f infra/docker/docker-compose.yml up -d
+#
+# Brings up every backing service the API expects. The API and web app run on
+# the host via `npm run dev` so hot reload stays fast.
+
+name: edusphere-erp
+
+services:
+  postgres:
+    # PostGIS image rather than plain postgres — the geofence and
+    # route-deviation engines depend on the extension.
+    image: postgis/postgis:16-3.4
+    container_name: erp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: erp
+      POSTGRES_PASSWORD: erp_password
+      POSTGRES_DB: school_erp
+      # Sensible collation for Indian deployments.
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8'
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U erp -d school_erp']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: erp-redis
+    restart: unless-stopped
+    # Persist to disk so cached live positions survive a restart.
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  mosquitto:
+    # MQTT broker for hardware GPS trackers (PRD 8.1).
+    image: eclipse-mosquitto:2
+    container_name: erp-mqtt
+    restart: unless-stopped
+    ports:
+      - '1883:1883'
+      - '9001:9001'
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt_data:/mosquitto/data
+
+  minio:
+    # S3-compatible object storage for documents, photos and report-card PDFs.
+    image: minio/minio:latest
+    container_name: erp-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - '9000:9000'
+      - '9090:9001'
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  mailhog:
+    # Captures outbound email in development so nothing reaches real parents.
+    image: mailhog/mailhog:latest
+    container_name: erp-mailhog
+    restart: unless-stopped
+    ports:
+      - '1025:1025'
+      - '8025:8025'
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: erp-prometheus
+    restart: unless-stopped
+    ports:
+      - '9091:9090'
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    profiles: ['observability']
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: erp-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+    ports:
+      - '3001:3000'
+    volumes:
+      - grafana_data:/var/lib/grafana
+    profiles: ['observability']
+
+volumes:
+  postgres_data:
+  redis_data:
+  mqtt_data:
+  minio_data:
+  prometheus_data:
+  grafana_data:

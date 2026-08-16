@@ -1,0 +1,307 @@
+/*
+  Inter, self-hosted as a variable font. Bundling it rather than linking Google
+  Fonts removes a render-blocking third-party request and means the app looks
+  right offline and behind a corporate proxy.
+*/
+@import '@fontsource-variable/inter/wght.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   Design tokens
+
+   Light is the default on bare `:root`; dark is applied by the `.dark` class,
+   which the inline script in index.html sets before first paint. Every colour
+   has a value in both themes — none is defined only inside the dark block.
+   ========================================================================== */
+
+@layer base {
+  :root {
+    /* Brand — indigo/violet. Overridden per tenant at runtime. */
+    --brand-50: 238 242 255;
+    --brand-100: 224 231 255;
+    --brand-200: 199 210 254;
+    --brand-300: 165 180 252;
+    --brand-400: 129 140 248;
+    --brand-500: 99 102 241;
+    --brand-600: 79 70 229;
+    --brand-700: 67 56 202;
+    --brand-800: 55 48 163;
+    --brand-900: 49 46 129;
+    --brand-950: 30 27 75;
+
+    /*
+      Surfaces carry a trace of the brand hue rather than being pure neutral
+      grey. It is barely perceptible in isolation but makes the whole product
+      read as one designed system instead of default Tailwind slate.
+    */
+    --canvas: 247 248 252;
+    --surface: 255 255 255;
+    --surface-raised: 255 255 255;
+    --surface-sunken: 241 243 249;
+    --hairline: 226 230 240;
+
+    --ink: 17 24 42;
+    --ink-muted: 82 93 117;
+    --ink-subtle: 142 152 173;
+
+    --success: 22 163 74;
+    --success-soft: 240 253 244;
+    --warning: 217 119 6;
+    --warning-soft: 255 251 235;
+    --danger: 220 38 38;
+    --danger-soft: 254 242 242;
+    --info: 2 132 199;
+    --info-soft: 240 249 255;
+
+    --sidebar-width: 16rem;
+    --topbar-height: 3.75rem;
+  }
+
+  .dark {
+    --brand-50: 30 27 75;
+    --brand-100: 49 46 129;
+    --brand-200: 55 48 163;
+    --brand-300: 67 56 202;
+    --brand-400: 99 102 241;
+    --brand-500: 129 140 248;
+    --brand-600: 139 148 250;
+    --brand-700: 165 180 252;
+    --brand-800: 199 210 254;
+    --brand-900: 224 231 255;
+    --brand-950: 238 242 255;
+
+    /*
+      Dark mode is built from a navy base, not black. Pure black surfaces make
+      elevation impossible to read and cause halation against light text; a
+      blue-shifted charcoal keeps cards visibly stacked above the canvas.
+    */
+    --canvas: 9 12 23;
+    --surface: 17 22 38;
+    --surface-raised: 24 31 51;
+    --surface-sunken: 13 17 31;
+    --hairline: 40 50 74;
+
+    --ink: 237 242 250;
+    --ink-muted: 160 173 196;
+    --ink-subtle: 110 125 150;
+
+    --success: 74 222 128;
+    --success-soft: 5 46 22;
+    --warning: 251 191 36;
+    --warning-soft: 60 32 4;
+    --danger: 248 113 113;
+    --danger-soft: 60 12 12;
+    --info: 56 189 248;
+    --info-soft: 8 47 73;
+  }
+
+  * {
+    @apply border-hairline;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-canvas text-ink font-sans antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    /*
+      Hard guarantee that the document never scrolls sideways. A single
+      decorative element wider than the viewport used to shift the entire app
+      and hide content behind the sidebar. `clip` does not create a scroll
+      container, so sticky headers keep working.
+    */
+    overflow-x: clip;
+  }
+
+  /*
+    Media and embedded content default to shrinking rather than forcing the
+    page wider. Long unbroken strings (a URL, an admission number) wrap instead
+    of stretching their container.
+  */
+  img,
+  svg,
+  video,
+  canvas {
+    @apply max-w-full;
+  }
+
+  th,
+  td,
+  p,
+  h1,
+  h2,
+  h3 {
+    overflow-wrap: break-word;
+  }
+
+  /* A single, consistent focus treatment. Never remove it without replacing
+     it — keyboard users depend on this being visible everywhere. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand-500 ring-offset-2 ring-offset-canvas;
+  }
+
+  ::selection {
+    @apply bg-brand-500/25;
+  }
+
+  /* Scrollbars — subtle, but present enough to signal overflow. */
+  ::-webkit-scrollbar {
+    @apply h-2 w-2;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-ink-subtle/30;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-ink-subtle/50;
+  }
+
+  /* Respect the user's motion preference. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /* Frosted panel used by the topbar and modal chrome. */
+  .glass {
+    @apply bg-surface/80 backdrop-blur-xl backdrop-saturate-150;
+  }
+
+  /* ------------------------------------------------------------------
+     Elevation & surface treatments
+     ------------------------------------------------------------------ */
+
+  /* Card that lifts slightly on hover. Used for anything clickable. */
+  .card-interactive {
+    @apply transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg;
+  }
+
+  /*
+    A hairline gradient along the top edge. Cheaper and far subtler than a
+    full gradient border, and it survives both themes.
+  */
+  .card-accent {
+    @apply relative overflow-hidden;
+  }
+  .card-accent::before {
+    @apply absolute inset-x-0 top-0 h-px;
+    content: '';
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgb(var(--brand-500) / 0.5) 30%,
+      rgb(var(--brand-400) / 0.7) 50%,
+      rgb(var(--brand-500) / 0.5) 70%,
+      transparent
+    );
+  }
+
+  /*
+    Soft radial wash behind hero areas.
+
+    `overflow-x: clip` is essential: the glow is deliberately wider than its
+    container, and without clipping it pushed the document wider than the
+    viewport and produced a horizontal scrollbar across the whole app. `clip`
+    rather than `hidden` because `hidden` would create a scroll container and
+    break `position: sticky` on descendants.
+  */
+  .aurora {
+    @apply relative isolate;
+    overflow-x: clip;
+  }
+  .aurora::before {
+    @apply pointer-events-none absolute -inset-x-16 -top-24 -z-10 h-56 opacity-60 blur-3xl;
+    content: '';
+    background:
+      radial-gradient(40% 60% at 20% 50%, rgb(var(--brand-500) / 0.22), transparent 70%),
+      radial-gradient(35% 55% at 75% 40%, rgb(var(--info) / 0.18), transparent 70%);
+  }
+
+  /* Grid texture for empty/hero panels. */
+  .grid-texture {
+    background-image:
+      linear-gradient(rgb(var(--hairline) / 0.6) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(var(--hairline) / 0.6) 1px, transparent 1px);
+    background-size: 28px 28px;
+    mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, #000 40%, transparent 100%);
+  }
+
+  /* Sticky table header that stays legible while rows scroll under it. */
+  .table-sticky-head thead th {
+    @apply sticky top-0 z-10 bg-surface/95 backdrop-blur;
+  }
+
+  /* Focus ring for a whole row, used by keyboard-navigable tables. */
+  .row-focus {
+    @apply focus-visible:relative focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-500;
+  }
+
+  /* Loading placeholder with a travelling highlight. */
+  .skeleton {
+    @apply relative overflow-hidden rounded-md bg-surface-sunken;
+  }
+  .skeleton::after {
+    @apply absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-white/10 to-transparent;
+    content: '';
+  }
+
+  /* Wide content (tables, charts) must scroll inside its own container so the
+     page body never scrolls horizontally. */
+  .scroll-x {
+    @apply -mx-1 overflow-x-auto px-1;
+    scrollbar-width: thin;
+  }
+
+  .card {
+    @apply rounded-xl border border-hairline bg-surface shadow-sm;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  /* Visible only to screen readers — for labels that would clutter the UI. */
+  .sr-only-focusable:not(:focus):not(:focus-within) {
+    @apply sr-only;
+  }
+
+  /* Tabular figures keep numeric columns from jittering as values update. */
+  .nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Leaflet overrides so the map inherits our surface colours instead of its
+   default white chrome. */
+.leaflet-container {
+  @apply bg-surface-sunken font-sans;
+}
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  @apply bg-surface text-ink shadow-lg;
+}
+.leaflet-bar a {
+  @apply bg-surface text-ink;
+}
+.dark .leaflet-tile-pane {
+  /* OSM tiles are light-only; this makes them legible in dark mode. */
+  filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.9);
+}

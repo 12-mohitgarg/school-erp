@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  # A new push supersedes an in-flight run on the same ref.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  quality:
+    name: Typecheck & build
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # PostGIS, not plain postgres — migrations install the extension.
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: erp
+          POSTGRES_PASSWORD: erp_password
+          POSTGRES_DB: school_erp_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U erp"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://erp:erp_password@localhost:5432/school_erp_test?schema=public
+      DIRECT_DATABASE_URL: postgresql://erp:erp_password@localhost:5432/school_erp_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      # Throwaway values — the config validator refuses to boot without them.
+      JWT_ACCESS_SECRET: ci_access_secret_that_is_at_least_32_chars_long
+      JWT_REFRESH_SECRET: ci_refresh_secret_that_is_at_least_32_chars_long
+      ENCRYPTION_KEY: '0000000000000000000000000000000000000000000000000000000000000000'
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        # The API and web app import its compiled types, so this must run first.
+        run: npm run build --workspace=@erp/shared
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      - name: Apply migrations
+        run: npm run db:deploy --workspace=@erp/api
+
+      - name: Apply PostGIS layer
+        run: node apps/api/prisma/sql/apply.mjs
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint --if-present
+        continue-on-error: true
+
+      - name: Test
+        run: npm test --if-present
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke-test the API
+        run: |
+          npm run db:seed --workspace=@erp/api
+          npm start --workspace=@erp/api &
+          # Wait for readiness rather than sleeping a fixed amount.
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4000/health > /dev/null; then break; fi
+            sleep 2
+          done
+          curl -sf http://localhost:4000/health | tee /dev/stderr | grep -q '"status":"ok"'
+          curl -sf -X POST http://localhost:4000/api/v1/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"identifier":"principal@dpsdelhi.edu.in","password":"Password@123"}' \
+            | grep -q '"success":true'
+
+  security:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      # Report high/critical advisories without blocking the build on
+      # transitive issues that have no fix available yet.
+      - run: npm audit --audit-level=high
+        continue-on-error: true

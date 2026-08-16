@@ -1,0 +1,409 @@
+/** System Settings: institution profile, branches, users, RBAC, integrations. */
+
+import { Router } from 'express';
+import { z } from 'zod';
+import { asyncHandler, ok, created, paginated, pageParams } from '../../core/http/respond.js';
+import { validate, idParam, uuidSchema, emailSchema, phoneSchema, passwordSchema, latitude, longitude, listQuery, Validated } from '../../core/http/validate.js';
+import { requireAuth, requirePermission, requireSuperAdmin } from '../../core/auth/middleware.js';
+import { scopedRequest } from '../../core/tenancy/scope.js';
+import { auditFromRequest } from '../../core/audit/audit.service.js';
+import { AppError } from '../../core/errors/AppError.js';
+import { prisma } from '../../core/db/prisma.js';
+import { hashPassword, encryptSecret, randomToken } from '../../core/auth/password.js';
+import { invalidateUserContext, invalidateManyContexts } from '../../core/auth/context.js';
+import { revokeAllUserTokens } from '../../core/auth/tokens.js';
+import { ALL_PERMISSIONS, ROLE_DEFINITIONS } from '@erp/shared';
+
+const router = Router();
+
+// --- Institution -----------------------------------------------------------
+
+router.get('/institution', requirePermission('settings:view'), asyncHandler(async (req, res) => {
+  const { auth } = scopedRequest(req);
+  return ok(res, await prisma.tenant.findUniqueOrThrow({
+    where: { id: auth.tenantId },
+    include: { branches: { where: { isActive: true } } },
+  }));
+}));
+
+router.patch('/institution', requirePermission('settings:update'),
+  validate({ body: z.object({
+    name: z.string().trim().min(1).max(160).optional(),
+    legalName: z.string().max(200).optional(),
+    logoUrl: z.string().url().max(500).optional(),
+    primaryColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+    email: emailSchema.optional(),
+    phone: phoneSchema.optional(),
+    website: z.string().url().max(200).optional(),
+    addressLine1: z.string().max(200).optional(),
+    city: z.string().max(80).optional(),
+    state: z.string().max(80).optional(),
+    postalCode: z.string().max(12).optional(),
+    timezone: z.string().max(60).optional(),
+    currency: z.string().length(3).optional(),
+    locale: z.string().max(10).optional(),
+    gstin: z.string().max(20).optional(),
+    settings: z.record(z.unknown()).optional(),
+  }) }),
+  asyncHandler(async (req, res) => {
+    const auth = requireAuth(req);
+    const tenant = await prisma.tenant.update({
+      where: { id: auth.tenantId }, data: req.body as never,
+    });
+
+    await auditFromRequest(req, {
+      action: 'UPDATE', module: 'settings', entityType: 'Tenant', entityId: tenant.id,
+      after: req.body,
+    });
+
+    return ok(res, tenant);
+  }));
+
+// --- Branches --------------------------------------------------------------
+
+router.post('/branches', requirePermission('settings:update'),
+  validate({ body: z.object({
+    name: z.string().trim().min(1).max(160),
+    code: z.string().trim().min(1).max(20),
+    addressLine1: z.string().max(200).optional(),
+    city: z.string().max(80).optional(),
+    state: z.string().max(80).optional(),
+    phone: phoneSchema.optional(),
+    email: emailSchema.optional(),
+    principalName: z.string().max(120).optional(),
+    latitude: latitude.optional(),
+    longitude: longitude.optional(),
+    isHeadOffice: z.boolean().default(false),
+  }) }),
+  asyncHandler(async (req, res) => {
+    const auth = requireAuth(req);
+    const body = req.body as Record<string, unknown>;
+
+    const branch = await prisma.branch.create({
+      data: { tenantId: auth.tenantId, ...(body as Validated) },
+    });
+
+    // A campus with coordinates gets a default SCHOOL geofence so arrival and
+    // departure alerts work without extra setup.
+    if (body['latitude'] && body['longitude']) {
+      await prisma.geofence.create({
+        data: {
+          tenantId: auth.tenantId, branchId: branch.id,
+          name: `${branch.name} campus`, type: 'SCHOOL', shape: 'CIRCLE',
+          centerLatitude: body['latitude'] as number,
+          centerLongitude: body['longitude'] as number,
+          radiusMeters: 200,
+        },
+      });
+    }
+
+    await auditFromRequest(req, { action: 'CREATE', module: 'settings', entityType: 'Branch', entityId: branch.id });
+    return created(res, branch);
+  }));
+
+// --- Users & RBAC ----------------------------------------------------------
+
+router.get('/users', requirePermission('settings:view'),
+  validate({ query: listQuery.extend({ role: z.string().optional(), status: z.string().optional() }) }),
+  asyncHandler(async (req, res) => {
+    const { auth } = scopedRequest(req);
+    const { page, limit, skip, take } = pageParams(req.query);
+    const q = req.query as { search?: string; role?: string; status?: string };
+
+    const where = {
+      tenantId: auth.tenantId, deletedAt: null,
+      ...(q.role ? { role: q.role as never } : {}),
+      ...(q.status ? { status: q.status as never } : {}),
+      ...(q.search ? { OR: [
+        { firstName: { contains: q.search, mode: 'insensitive' as const } },
+        { lastName: { contains: q.search, mode: 'insensitive' as const } },
+        { email: { contains: q.search, mode: 'insensitive' as const } },
+      ] } : {}),
+    };
+
+    const [items, total] = await Promise.all([
+      prisma.user.findMany({
+        where, skip, take, orderBy: { createdAt: 'desc' },
+        select: {
+          id: true, email: true, phone: true, firstName: true, lastName: true,
+          role: true, scope: true, status: true, avatarUrl: true, lastLoginAt: true,
+          twoFactorEnabled: true, createdAt: true,
+          branch: { select: { id: true, name: true } },
+          customRole: { select: { id: true, name: true } },
+        },
+      }),
+      prisma.user.count({ where }),
+    ]);
+
+    return paginated(res, items, total, page, limit);
+  }));
+
+router.post('/users', requirePermission('settings:update'),
+  validate({ body: z.object({
+    email: emailSchema.optional(),
+    phone: phoneSchema.optional(),
+    firstName: z.string().trim().min(1).max(60),
+    lastName: z.string().trim().min(1).max(60),
+    role: z.enum(['SUPER_ADMIN', 'ADMIN', 'ADMINISTRATION', 'TEACHER', 'STUDENT', 'PARENT', 'ACCOUNTANT', 'LIBRARIAN', 'DRIVER', 'HR']),
+    branchId: uuidSchema.optional(),
+    password: passwordSchema.optional(),
+    employeeId: uuidSchema.optional(),
+    customRoleId: uuidSchema.optional(),
+  }).refine((d) => d.email || d.phone, { message: 'Provide an email or a phone number' }) }),
+  asyncHandler(async (req, res) => {
+    const auth = requireAuth(req);
+    const body = req.body as Record<string, unknown>;
+
+    // Only a super admin may mint another super admin.
+    if (body['role'] === 'SUPER_ADMIN' && auth.role !== 'SUPER_ADMIN') {
+      throw AppError.forbidden('Only a Super Admin can create another Super Admin');
+    }
+
+    const { password, employeeId, ...fields } = body;
+    const temporary = (password as string) ?? randomToken(9);
+
+    const user = await prisma.user.create({
+      data: {
+        tenantId: auth.tenantId,
+        ...(fields as Validated),
+        scope: ROLE_DEFINITIONS[body['role'] as keyof typeof ROLE_DEFINITIONS].scope,
+        passwordHash: await hashPassword(temporary),
+        // Force a rotation when we generated the password for them.
+        mustChangePassword: !password,
+        status: 'ACTIVE',
+      },
+      select: { id: true, email: true, phone: true, firstName: true, lastName: true, role: true },
+    });
+
+    if (employeeId) {
+      await prisma.employee.update({ where: { id: employeeId as string }, data: { userId: user.id } });
+    }
+
+    await auditFromRequest(req, {
+      action: 'CREATE', module: 'settings', entityType: 'User', entityId: user.id,
+      after: { email: user.email, role: user.role },
+    });
+
+    // The temporary password is returned once, for the admin to hand over.
+    return created(res, { ...user, temporaryPassword: password ? undefined : temporary });
+  }));
+
+router.patch('/users/:id', requirePermission('settings:update'),
+  validate({ params: idParam, body: z.object({
+    status: z.enum(['ACTIVE', 'SUSPENDED', 'DEACTIVATED']).optional(),
+    role: z.string().optional(),
+    branchId: uuidSchema.nullable().optional(),
+    extraPermissions: z.array(z.enum(ALL_PERMISSIONS as [string, ...string[]])).optional(),
+    deniedPermissions: z.array(z.enum(ALL_PERMISSIONS as [string, ...string[]])).optional(),
+    customRoleId: uuidSchema.nullable().optional(),
+  }) }),
+  asyncHandler(async (req, res) => {
+    const auth = requireAuth(req);
+    const targetId = req.params['id']!;
+    const patch = req.body as Record<string, unknown>;
+
+    const target = await prisma.user.findFirst({
+      where: { id: targetId, tenantId: auth.tenantId },
+      select: { id: true, role: true },
+    });
+    if (!target) throw AppError.notFound('User');
+
+    if ((target.role === 'SUPER_ADMIN' || patch['role'] === 'SUPER_ADMIN') && auth.role !== 'SUPER_ADMIN') {
+      throw AppError.forbidden('Only a Super Admin can modify Super Admin accounts');
+    }
+
+    const updated = await prisma.user.update({ where: { id: targetId }, data: patch as never });
+
+    // Permission and status changes take effect immediately.
+    await invalidateUserContext(targetId);
+    if (patch['status'] && patch['status'] !== 'ACTIVE') {
+      await revokeAllUserTokens(targetId);
+    }
+
+    await auditFromRequest(req, {
+      action: 'PERMISSION_CHANGE', module: 'settings', entityType: 'User', entityId: targetId,
+      after: patch,
+    });
+
+    return ok(res, updated);
+  }));
+
+/** Permission catalogue for the RBAC editor. */
+router.get('/permissions', requirePermission('settings:view'), asyncHandler(async (_req, res) =>
+  ok(res, {
+    permissions: ALL_PERMISSIONS,
+    roles: Object.values(ROLE_DEFINITIONS).map((d) => ({
+      role: d.role, label: d.label, description: d.description, scope: d.scope,
+      permissions: d.permissions === '*' ? ['*'] : d.permissions,
+    })),
+  }),
+));
+
+router.get('/custom-roles', requirePermission('settings:view'), asyncHandler(async (req, res) => {
+  const { auth } = scopedRequest(req);
+  return ok(res, await prisma.customRole.findMany({
+    where: { tenantId: auth.tenantId },
+    include: { _count: { select: { users: true } } },
+  }));
+}));
+
+router.post('/custom-roles', requirePermission('settings:update'),
+  validate({ body: z.object({
+    name: z.string().trim().min(1).max(60),
+    description: z.string().max(300).optional(),
+    baseRole: z.enum(['ADMIN', 'ADMINISTRATION', 'TEACHER', 'ACCOUNTANT', 'LIBRARIAN', 'HR']),
+    scope: z.enum(['TENANT', 'BRANCH', 'ASSIGNED', 'SELF', 'CHILDREN']).default('BRANCH'),
+    permissions: z.array(z.enum(ALL_PERMISSIONS as [string, ...string[]])).min(1),
+  }) }),
+  asyncHandler(async (req, res) => {
+    const auth = requireAuth(req);
+    const role = await prisma.customRole.create({
+      data: { tenantId: auth.tenantId, ...(req.body as Validated) },
+    });
+
+    await auditFromRequest(req, {
+      action: 'CREATE', module: 'settings', entityType: 'CustomRole', entityId: role.id, after: role,
+    });
+
+    return created(res, role);
+  }));
+
+router.patch('/custom-roles/:id', requirePermission('settings:update'),
+  validate({ params: idParam, body: z.object({
+    name: z.string().max(60).optional(),
+    description: z.string().max(300).optional(),
+    permissions: z.array(z.enum(ALL_PERMISSIONS as [string, ...string[]])).optional(),
+  }) }),
+  asyncHandler(async (req, res) => {
+    const auth = requireAuth(req);
+    const roleId = req.params['id']!;
+
+    const role = await prisma.customRole.update({
+      where: { id: roleId }, data: req.body as never,
+      include: { users: { select: { id: true } } },
+    });
+
+    // Everyone holding this role needs their cached permissions dropped.
+    await invalidateManyContexts(role.users.map((u) => u.id));
+
+    await auditFromRequest(req, {
+      action: 'PERMISSION_CHANGE', module: 'settings', entityType: 'CustomRole', entityId: roleId,
+      after: req.body,
+    });
+
+    return ok(res, role);
+  }));
+
+// --- Integrations ----------------------------------------------------------
+
+router.get('/integrations', requirePermission('settings:view'), asyncHandler(async (req, res) => {
+  const { auth } = scopedRequest(req);
+  const integrations = await prisma.integration.findMany({
+    where: { tenantId: auth.tenantId },
+    // `credentials` is deliberately excluded — the vault is write-only.
+    select: {
+      id: true, category: true, provider: true, label: true, isEnabled: true,
+      isSandbox: true, config: true, lastHealthCheckAt: true, lastHealthStatus: true,
+      lastErrorMessage: true, updatedAt: true,
+    },
+  });
+  return ok(res, integrations);
+}));
+
+router.put('/integrations', requirePermission('settings:update'),
+  validate({ body: z.object({
+    category: z.enum(['SMS', 'EMAIL', 'PAYMENT', 'MAPS', 'BIOMETRIC', 'STORAGE', 'PUSH', 'WHATSAPP']),
+    provider: z.string().trim().min(1).max(60),
+    label: z.string().trim().min(1).max(80),
+    isEnabled: z.boolean().default(false),
+    isSandbox: z.boolean().default(true),
+    credentials: z.record(z.string()).optional(),
+    config: z.record(z.unknown()).default({}),
+  }) }),
+  asyncHandler(async (req, res) => {
+    const auth = requireAuth(req);
+    const body = req.body as Record<string, unknown>;
+
+    // Credentials are encrypted at rest with AES-256-GCM.
+    const encrypted = body['credentials']
+      ? encryptSecret(JSON.stringify(body['credentials']))
+      : undefined;
+
+    const integration = await prisma.integration.upsert({
+      where: {
+        tenantId_category_provider: {
+          tenantId: auth.tenantId,
+          category: body['category'] as never,
+          provider: body['provider'] as string,
+        },
+      },
+      create: {
+        tenantId: auth.tenantId,
+        category: body['category'] as never,
+        provider: body['provider'] as string,
+        label: body['label'] as string,
+        isEnabled: body['isEnabled'] as boolean,
+        isSandbox: body['isSandbox'] as boolean,
+        credentials: encrypted ?? null,
+        config: body['config'] as never,
+      },
+      update: {
+        label: body['label'] as string,
+        isEnabled: body['isEnabled'] as boolean,
+        isSandbox: body['isSandbox'] as boolean,
+        ...(encrypted ? { credentials: encrypted } : {}),
+        config: body['config'] as never,
+      },
+      select: { id: true, category: true, provider: true, label: true, isEnabled: true },
+    });
+
+    await auditFromRequest(req, {
+      action: 'UPDATE', module: 'settings', entityType: 'Integration', entityId: integration.id,
+      // Never write the credentials themselves into the audit trail.
+      after: { category: integration.category, provider: integration.provider, isEnabled: integration.isEnabled },
+    });
+
+    return ok(res, integration);
+  }));
+
+/** Cross-tenant provisioning, restricted to platform operators. */
+router.post('/tenants', requireSuperAdmin,
+  validate({ body: z.object({
+    name: z.string().trim().min(1).max(160),
+    code: z.string().trim().min(2).max(20),
+    adminEmail: emailSchema,
+    adminFirstName: z.string().min(1).max(60),
+    adminLastName: z.string().min(1).max(60),
+  }) }),
+  asyncHandler(async (req, res) => {
+    const body = req.body as Record<string, string>;
+    const temporary = randomToken(9);
+
+    const result = await prisma.$transaction(async (tx) => {
+      const tenant = await tx.tenant.create({
+        data: { name: body['name']!, code: body['code']!.toUpperCase() },
+      });
+
+      const branch = await tx.branch.create({
+        data: { tenantId: tenant.id, name: 'Main Campus', code: 'MAIN', isHeadOffice: true },
+      });
+
+      const admin = await tx.user.create({
+        data: {
+          tenantId: tenant.id, branchId: branch.id,
+          email: body['adminEmail']!,
+          firstName: body['adminFirstName']!, lastName: body['adminLastName']!,
+          role: 'ADMIN', scope: 'TENANT',
+          passwordHash: await hashPassword(temporary),
+          mustChangePassword: true, status: 'ACTIVE',
+        },
+        select: { id: true, email: true },
+      });
+
+      return { tenant, branch, admin };
+    });
+
+    return created(res, { ...result, temporaryPassword: temporary });
+  }));
+
+export default router;
