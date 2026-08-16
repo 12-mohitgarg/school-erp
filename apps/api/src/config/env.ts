@@ -39,9 +39,6 @@ const envSchema = z.object({
 
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
 
-  REDIS_URL: z.string().default('redis://localhost:6379'),
-  REDIS_KEY_PREFIX: z.string().default('erp:'),
-
   // Secrets must be long enough to be meaningful; refuse to boot otherwise.
   JWT_ACCESS_SECRET: z.string().min(32, 'JWT_ACCESS_SECRET must be >= 32 characters'),
   JWT_REFRESH_SECRET: z.string().min(32, 'JWT_REFRESH_SECRET must be >= 32 characters'),
@@ -69,13 +66,25 @@ const envSchema = z.object({
 
   GOOGLE_MAPS_API_KEY: z.string().optional(),
 
-  S3_ENDPOINT: z.string().optional(),
-  S3_REGION: z.string().default('us-east-1'),
-  S3_BUCKET: z.string().default('school-erp'),
-  S3_ACCESS_KEY: z.string().optional(),
-  S3_SECRET_KEY: z.string().optional(),
-  S3_FORCE_PATH_STYLE: bool(true),
-  S3_PUBLIC_URL: z.string().optional(),
+  /*
+    Cloud storage — Cloudinary.
+
+    The browser uploads directly to Cloudinary with an *unsigned* preset, so
+    no file ever transits the API. The cloud name and preset are therefore
+    public by design; the API keeps them so it can hand them to the client and,
+    more importantly, so it can reject any stored URL that does not belong to
+    this cloud (see core/storage/cloudinary.ts).
+
+    API key/secret are optional and only needed to delete an asset, which is a
+    signed, server-only operation.
+  */
+  CLOUDINARY_CLOUD_NAME: z.string().optional(),
+  CLOUDINARY_UPLOAD_PRESET: z.string().optional(),
+  CLOUDINARY_API_KEY: z.string().optional(),
+  CLOUDINARY_API_SECRET: z.string().optional(),
+  CLOUDINARY_FOLDER: z.string().default('school-erp'),
+  /** Refuse uploads above this size, mirrored in the browser before sending. */
+  UPLOAD_MAX_MB: int(10),
 
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: int(587),

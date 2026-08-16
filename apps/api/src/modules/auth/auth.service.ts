@@ -21,14 +21,22 @@ import {
 import { loadUserContext, invalidateUserContext } from '../../core/auth/context.js';
 import { recordAudit } from '../../core/audit/audit.service.js';
 import { env } from '../../config/env.js';
-import { redis, keys } from '../../core/cache/redis.js';
+import { store, keys } from '../../core/cache/store.js';
 import { moduleLogger } from '../../core/logger.js';
 import { notify } from '../../core/notifications/notification.service.js';
 
 const log = moduleLogger('auth');
 
-/** Shape the client-facing user object from a loaded context. */
-async function buildAuthUser(userId: string): Promise<AuthUser> {
+/**
+ * Shape the client-facing user object from a loaded context.
+ *
+ * `actingTenantId` is the school the session is currently working in. For
+ * almost everyone that is their own school. For a platform admin who has
+ * opened another school's panel it is that school, and the returned profile
+ * names *that* school — the header, branding and every "which school am I in?"
+ * cue in the UI read from here.
+ */
+async function buildAuthUser(userId: string, actingTenantId?: string): Promise<AuthUser> {
   const user = await prisma.user.findUniqueOrThrow({
     where: { id: userId },
     select: {
@@ -44,6 +52,7 @@ async function buildAuthUser(userId: string): Promise<AuthUser> {
       twoFactorEnabled: true,
       tenantId: true,
       branchId: true,
+      isPlatformAdmin: true,
       tenant: { select: { name: true } },
       branch: { select: { name: true } },
       student: { select: { id: true } },
@@ -52,6 +61,14 @@ async function buildAuthUser(userId: string): Promise<AuthUser> {
   });
 
   const context = await loadUserContext(userId);
+
+  const impersonating = Boolean(actingTenantId && actingTenantId !== user.tenantId);
+  const activeTenant = impersonating
+    ? await prisma.tenant.findUnique({
+        where: { id: actingTenantId! },
+        select: { id: true, name: true },
+      })
+    : null;
 
   const authUser: AuthUser = {
     id: user.id,
@@ -64,13 +81,15 @@ async function buildAuthUser(userId: string): Promise<AuthUser> {
     role: user.role,
     permissions: context.permissions as AuthUser['permissions'],
     scope: context.scope,
-    tenantId: user.tenantId,
-    tenantName: user.tenant.name,
-    branchId: user.branchId,
-    branchName: user.branch?.name ?? null,
+    tenantId: activeTenant?.id ?? user.tenantId,
+    tenantName: activeTenant?.name ?? user.tenant.name,
+    branchId: impersonating ? null : user.branchId,
+    branchName: impersonating ? null : (user.branch?.name ?? null),
     locale: user.locale,
     mustChangePassword: user.mustChangePassword,
     twoFactorEnabled: user.twoFactorEnabled,
+    isPlatformAdmin: user.isPlatformAdmin,
+    ...(impersonating ? { impersonatingTenant: true as const } : {}),
   };
 
   if (user.student) authUser.studentId = user.student.id;
@@ -138,10 +157,10 @@ export async function login(
   const normalised = identifier.trim().toLowerCase();
 
   const attemptKey = keys.loginAttempts(normalised);
-  const attempts = Number((await redis.get(attemptKey)) ?? 0);
+  const attempts = Number((await store.get(attemptKey)) ?? 0);
 
   if (attempts >= env.MAX_LOGIN_ATTEMPTS) {
-    const ttl = await redis.ttl(attemptKey);
+    const ttl = await store.ttl(attemptKey);
     throw AppError.accountLocked(Math.max(1, Math.ceil(ttl / 60)));
   }
 
@@ -161,6 +180,8 @@ export async function login(
       firstName: true,
       lastName: true,
       lockedUntil: true,
+      isPlatformAdmin: true,
+      tenant: { select: { isActive: true, name: true } },
     },
   });
 
@@ -171,8 +192,8 @@ export async function login(
     : await verifyPassword(password, '$2a$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinva');
 
   if (!user || !passwordOk) {
-    const next = await redis.incr(attemptKey);
-    if (next === 1) await redis.expire(attemptKey, env.LOCKOUT_MINUTES * 60);
+    const next = await store.incr(attemptKey);
+    if (next === 1) await store.expire(attemptKey, env.LOCKOUT_MINUTES * 60);
 
     if (user) {
       await recordAudit({
@@ -204,8 +225,20 @@ export async function login(
     );
   }
 
+  /*
+    A suspended school locks out everyone who belongs to it — otherwise
+    suspension would only stop new schools from being created while existing
+    staff carried on working. Platform operators are exempt, since they are the
+    ones who need to get in and lift the suspension.
+  */
+  if (!user.tenant.isActive && !user.isPlatformAdmin) {
+    throw AppError.accountInactive(
+      `${user.tenant.name} is currently suspended. Please contact your platform administrator.`,
+    );
+  }
+
   // Success — clear the throttle and record the login.
-  await redis.del(attemptKey);
+  await store.del(attemptKey);
 
   await prisma.user.update({
     where: { id: user.id },
@@ -251,8 +284,11 @@ export async function login(
   };
 }
 
-export async function getCurrentUser(userId: string): Promise<AuthUser> {
-  return buildAuthUser(userId);
+export async function getCurrentUser(
+  userId: string,
+  actingTenantId?: string,
+): Promise<AuthUser> {
+  return buildAuthUser(userId, actingTenantId);
 }
 
 // ---------------------------------------------------------------------------
@@ -316,7 +352,7 @@ export async function requestPasswordReset(identifier: string): Promise<void> {
 
   const token = randomToken();
   // Store only the hash, with a short TTL.
-  await redis.setex(`pwreset:${hashToken(token)}`, 60 * 60, user.id);
+  await store.setex(keys.passwordReset(hashToken(token)), 60 * 60, user.id);
 
   await notify({
     tenantId: user.tenantId,
@@ -330,8 +366,8 @@ export async function requestPasswordReset(identifier: string): Promise<void> {
 }
 
 export async function resetPassword(token: string, newPassword: string): Promise<void> {
-  const redisKey = `pwreset:${hashToken(token)}`;
-  const userId = await redis.get(redisKey);
+  const resetKey = keys.passwordReset(hashToken(token));
+  const userId = await store.get(resetKey);
 
   if (!userId) throw AppError.tokenInvalid('This reset link is invalid or has expired');
 
@@ -346,7 +382,7 @@ export async function resetPassword(token: string, newPassword: string): Promise
   });
 
   // One-shot token.
-  await redis.del(redisKey);
+  await store.del(resetKey);
   await revokeAllUserTokens(userId);
   await invalidateUserContext(userId);
 

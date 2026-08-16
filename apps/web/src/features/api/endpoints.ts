@@ -6,7 +6,9 @@
  * Each group is separated by a banner comment.
  */
 
+import type { SchoolSummary } from '@erp/shared';
 import { api, unwrap, unwrapPaged, queryString, type Envelope, type Paged } from '@/lib/api';
+import type { StorageConfig } from '@/lib/cloudinary';
 
 // ---------------------------------------------------------------------------
 // Shared shapes
@@ -208,6 +210,117 @@ export interface AnnouncementRow {
 }
 
 // ---------------------------------------------------------------------------
+
+
+// ---------------------------------------------------------------------------
+// Platform, scheduler and admissions shapes
+// ---------------------------------------------------------------------------
+
+export interface PlatformOverview {
+  schools: number;
+  activeSchools: number;
+  suspendedSchools: number;
+  students: number;
+  staff: number;
+  users: number;
+  vehicles: number;
+  activeSos: number;
+  recentSchools: Array<{
+    id: string;
+    name: string;
+    code: string;
+    createdAt: string;
+    isActive: boolean;
+  }>;
+}
+
+export interface CreatedSchool {
+  school: SchoolSummary;
+  admin: { id: string; email: string | null; fullName: string };
+  /** Present only when the platform admin let the system generate one. */
+  temporaryPassword?: string;
+}
+
+export interface JobRunRecord {
+  status: string;
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number | null;
+  affected: number;
+  summary: string | null;
+  error: string | null;
+  manual: boolean;
+}
+
+export interface SchedulerJob {
+  name: string;
+  label: string;
+  /** The PRD clause this job satisfies — shown so the schedule is auditable. */
+  relatesTo: string;
+  description: string;
+  intervalMs: number;
+  manualRunnable: boolean;
+  failures24h: number;
+  lastRun: JobRunRecord | null;
+  nextRunAt: string | null;
+}
+
+export interface SchedulerPayload {
+  jobs: SchedulerJob[];
+  recentRuns: Array<JobRunRecord & { id: string; job: string }>;
+}
+
+export interface JobRunOutcome {
+  job: string;
+  status: 'SUCCESS' | 'FAILED' | 'SKIPPED';
+  durationMs: number;
+  affected: number;
+  summary: string | null;
+  error: string | null;
+}
+
+export interface AdmissionApplication {
+  id: string;
+  applicationNo: string;
+  status: string;
+  firstName: string;
+  lastName: string;
+  dateOfBirth: string;
+  gender: string;
+  guardianName: string;
+  guardianPhone: string;
+  guardianEmail: string | null;
+  appliedForClassId: string | null;
+  previousSchool: string | null;
+  source: string | null;
+  enrolledStudentId: string | null;
+  rejectionReason: string | null;
+  notes: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdmissionFunnel {
+  stages: Record<string, number>;
+  total: number;
+  convertedThisYear: number;
+}
+
+export interface StudentDocument {
+  id: string;
+  documentType: string;
+  title: string;
+  fileUrl: string;
+  filePublicId: string | null;
+  fileResourceType: string;
+  mimeType: string | null;
+  fileSizeBytes: number | null;
+  isVerified: boolean;
+  verifiedAt: string | null;
+  remarks: string | null;
+  createdAt: string;
+}
 
 export const endpoints = api.injectEndpoints({
   endpoints: (build) => ({
@@ -674,6 +787,193 @@ export const endpoints = api.injectEndpoints({
       invalidatesTags: ['User'],
     }),
 
+
+    // -----------------------------------------------------------------------
+    // Platform — multi-school control plane
+    // -----------------------------------------------------------------------
+
+    platformOverview: build.query<PlatformOverview, void>({
+      query: () => '/platform/overview',
+      transformResponse: unwrap,
+      providesTags: ['School'],
+    }),
+
+    schools: build.query<Paged<SchoolSummary>, ListParams>({
+      query: (params) => `/platform/schools${queryString(params)}`,
+      transformResponse: unwrapPaged<SchoolSummary>,
+      providesTags: ['School'],
+    }),
+
+    school: build.query<SchoolSummary, string>({
+      query: (id) => `/platform/schools/${id}`,
+      transformResponse: unwrap,
+      providesTags: ['School'],
+    }),
+
+    createSchool: build.mutation<CreatedSchool, Record<string, unknown>>({
+      query: (body) => ({ url: '/platform/schools', method: 'POST', body }),
+      transformResponse: unwrap,
+      invalidatesTags: ['School'],
+    }),
+
+    updateSchool: build.mutation<SchoolSummary, { id: string; body: Record<string, unknown> }>({
+      query: ({ id, body }) => ({ url: `/platform/schools/${id}`, method: 'PATCH', body }),
+      transformResponse: unwrap,
+      invalidatesTags: ['School'],
+    }),
+
+    setSchoolStatus: build.mutation<
+      SchoolSummary,
+      { id: string; active: boolean; reason?: string }
+    >({
+      query: ({ id, ...body }) => ({ url: `/platform/schools/${id}/status`, method: 'POST', body }),
+      transformResponse: unwrap,
+      invalidatesTags: ['School'],
+    }),
+
+    addSchoolAdmin: build.mutation<
+      { id: string; email: string | null; temporaryPassword: string },
+      { id: string; body: Record<string, unknown> }
+    >({
+      query: ({ id, body }) => ({ url: `/platform/schools/${id}/admins`, method: 'POST', body }),
+      transformResponse: unwrap,
+      invalidatesTags: ['School'],
+    }),
+
+    /*
+      Switch the session into a school's own panel.
+
+      Returns a fresh access token scoped to that school. The caller stores it
+      and resets the RTK cache; every subsequent request then resolves against
+      the new school with no other change anywhere in the app.
+    */
+    openSchool: build.mutation<
+      {
+        tokens: { accessToken: string; expiresIn: number; tokenType: string };
+        school: { id: string; name: string };
+        impersonating: boolean;
+      },
+      string
+    >({
+      query: (id) => ({ url: `/platform/schools/${id}/open`, method: 'POST', body: {} }),
+      transformResponse: unwrap,
+    }),
+
+    // -----------------------------------------------------------------------
+    // Storage & scheduler
+    // -----------------------------------------------------------------------
+
+    storageConfig: build.query<StorageConfig, void>({
+      query: () => '/settings/storage',
+      transformResponse: unwrap,
+      providesTags: ['Settings'],
+    }),
+
+    scheduler: build.query<SchedulerPayload, void>({
+      query: () => '/settings/scheduler',
+      transformResponse: unwrap,
+      providesTags: ['Scheduler'],
+    }),
+
+    runJob: build.mutation<JobRunOutcome, string>({
+      query: (name) => ({ url: `/settings/scheduler/${name}/run`, method: 'POST', body: {} }),
+      transformResponse: unwrap,
+      invalidatesTags: ['Scheduler'],
+    }),
+
+    updateInstitution: build.mutation<Record<string, unknown>, Record<string, unknown>>({
+      query: (body) => ({ url: '/settings/institution', method: 'PATCH', body }),
+      transformResponse: unwrap,
+      invalidatesTags: ['Settings', 'Auth'],
+    }),
+
+    // -----------------------------------------------------------------------
+    // Admissions
+    // -----------------------------------------------------------------------
+
+    admissionApplications: build.query<Paged<AdmissionApplication>, ListParams>({
+      query: (params) => `/students/admissions/applications${queryString(params)}`,
+      transformResponse: unwrapPaged<AdmissionApplication>,
+      providesTags: ['Admission'],
+    }),
+
+    admissionFunnel: build.query<AdmissionFunnel, void>({
+      query: () => '/students/admissions/funnel',
+      transformResponse: unwrap,
+      providesTags: ['Admission'],
+    }),
+
+    createApplication: build.mutation<AdmissionApplication, Record<string, unknown>>({
+      query: (body) => ({ url: '/students/admissions/applications', method: 'POST', body }),
+      transformResponse: unwrap,
+      invalidatesTags: ['Admission'],
+    }),
+
+    updateApplication: build.mutation<
+      AdmissionApplication,
+      { id: string; body: Record<string, unknown> }
+    >({
+      query: ({ id, body }) => ({
+        url: `/students/admissions/applications/${id}`,
+        method: 'PATCH',
+        body,
+      }),
+      transformResponse: unwrap,
+      invalidatesTags: ['Admission'],
+    }),
+
+    enrolApplication: build.mutation<
+      { application: AdmissionApplication; student: { id: string; admissionNo: string } },
+      { id: string; body: Record<string, unknown> }
+    >({
+      query: ({ id, body }) => ({
+        url: `/students/admissions/applications/${id}/enroll`,
+        method: 'POST',
+        body,
+      }),
+      transformResponse: unwrap,
+      invalidatesTags: ['Admission', 'Student', 'Dashboard'],
+    }),
+
+    // -----------------------------------------------------------------------
+    // Student documents
+    // -----------------------------------------------------------------------
+
+    studentDocuments: build.query<StudentDocument[], string>({
+      query: (studentId) => `/students/${studentId}/documents`,
+      transformResponse: (r: Envelope<StudentDocument[]>) => r.data,
+      providesTags: ['Student'],
+    }),
+
+    addStudentDocument: build.mutation<
+      StudentDocument,
+      { studentId: string; body: Record<string, unknown> }
+    >({
+      query: ({ studentId, body }) => ({
+        url: `/students/${studentId}/documents`,
+        method: 'POST',
+        body,
+      }),
+      transformResponse: unwrap,
+      invalidatesTags: ['Student'],
+    }),
+
+    verifyStudentDocument: build.mutation<StudentDocument, { docId: string; remarks?: string }>({
+      query: ({ docId, ...body }) => ({
+        url: `/students/documents/${docId}/verify`,
+        method: 'POST',
+        body,
+      }),
+      transformResponse: unwrap,
+      invalidatesTags: ['Student'],
+    }),
+
+    deleteStudentDocument: build.mutation<{ deleted: boolean }, string>({
+      query: (docId) => ({ url: `/students/documents/${docId}`, method: 'DELETE' }),
+      transformResponse: unwrap,
+      invalidatesTags: ['Student'],
+    }),
+
     integrations: build.query<Array<Record<string, unknown>>, void>({
       query: () => '/settings/integrations',
       transformResponse: (r: Envelope<never>) => r.data,
@@ -700,4 +1000,12 @@ export const {
   useReportAcademicQuery, useReportSafetyQuery, useReportLibraryQuery, useReportTransportQuery,
   useReportHrQuery, useReportParentEngagementQuery, useAuditLogQuery,
   useInstitutionQuery, useUsersQuery, usePermissionCatalogueQuery, useUpdateUserMutation, useIntegrationsQuery,
+  useUpdateInstitutionMutation,
+  usePlatformOverviewQuery, useSchoolsQuery, useSchoolQuery, useCreateSchoolMutation,
+  useUpdateSchoolMutation, useSetSchoolStatusMutation, useAddSchoolAdminMutation, useOpenSchoolMutation,
+  useStorageConfigQuery, useSchedulerQuery, useRunJobMutation,
+  useAdmissionApplicationsQuery, useAdmissionFunnelQuery, useCreateApplicationMutation,
+  useUpdateApplicationMutation, useEnrolApplicationMutation,
+  useStudentDocumentsQuery, useAddStudentDocumentMutation, useVerifyStudentDocumentMutation,
+  useDeleteStudentDocumentMutation,
 } = endpoints;

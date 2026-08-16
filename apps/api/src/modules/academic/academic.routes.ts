@@ -19,7 +19,7 @@ import { scopedRequest, resolveWriteBranch } from '../../core/tenancy/scope.js';
 import { auditFromRequest } from '../../core/audit/audit.service.js';
 import { AppError } from '../../core/errors/AppError.js';
 import { prisma } from '../../core/db/prisma.js';
-import { cached, cacheInvalidateTag, keys } from '../../core/cache/redis.js';
+import { cached, cacheInvalidateTag, keys } from '../../core/cache/store.js';
 import * as service from './academic.service.js';
 
 const router = Router();

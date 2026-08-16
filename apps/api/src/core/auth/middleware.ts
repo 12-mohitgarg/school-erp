@@ -7,7 +7,14 @@
  */
 
 import type { Request, RequestHandler } from 'express';
-import { hasAnyPermission, hasPermission, type Permission, type Role } from '@erp/shared';
+import {
+  hasAnyPermission,
+  hasPermission,
+  type JwtPayload,
+  type Permission,
+  type Role,
+} from '@erp/shared';
+import type { RequestAuth } from '../../types/express.js';
 import { AppError } from '../errors/AppError.js';
 import { verifyAccessToken } from './tokens.js';
 import { loadUserContext } from './context.js';
@@ -22,6 +29,31 @@ function extractToken(req: Request): string | null {
   return cookieToken ?? null;
 }
 
+/**
+ * Reconcile the tenant in the token with the tenant on the account.
+ *
+ * Three cases:
+ *   * They match — the ordinary path.
+ *   * They differ and the token is flagged `pa`, and the user really is a
+ *     platform admin — they have opened another school's panel, so the request
+ *     runs against that school. Branch scoping is dropped, since their own
+ *     branch belongs to a different school entirely.
+ *   * Anything else — the account was moved or re-keyed, or the token is
+ *     claiming a school it has no right to. Reject it.
+ */
+function applyActingTenant(
+  context: Omit<RequestAuth, 'sessionId'>,
+  payload: JwtPayload,
+): Omit<RequestAuth, 'sessionId'> {
+  if (context.tenantId === payload.tenantId) return context;
+
+  if (payload.pa && context.isPlatformAdmin) {
+    return { ...context, tenantId: payload.tenantId, branchId: null };
+  }
+
+  throw AppError.tokenInvalid('Token no longer valid for this account');
+}
+
 /** Require a valid access token; populates `req.auth`. */
 export const authenticate: RequestHandler = (req, _res, next) => {
   void (async () => {
@@ -32,13 +64,7 @@ export const authenticate: RequestHandler = (req, _res, next) => {
       const payload = verifyAccessToken(token);
       const context = await loadUserContext(payload.sub);
 
-      // The token's tenant must still match the user's — a moved or re-keyed
-      // account invalidates tokens issued under the old tenant.
-      if (context.tenantId !== payload.tenantId) {
-        throw AppError.tokenInvalid('Token no longer valid for this account');
-      }
-
-      req.auth = { ...context, sessionId: payload.sid };
+      req.auth = { ...applyActingTenant(context, payload), sessionId: payload.sid };
       next();
     } catch (err) {
       next(err);
@@ -58,7 +84,7 @@ export const optionalAuth: RequestHandler = (req, _res, next) => {
     try {
       const payload = verifyAccessToken(token);
       const context = await loadUserContext(payload.sub);
-      req.auth = { ...context, sessionId: payload.sid };
+      req.auth = { ...applyActingTenant(context, payload), sessionId: payload.sid };
     } catch {
       // An invalid token on an optional route is simply ignored.
     }
@@ -123,8 +149,28 @@ export function requireRole(...roles: Role[]): RequestHandler {
   };
 }
 
-/** Super-admin-only routes (tenant provisioning, cross-tenant diagnostics). */
+/** Super-admin-only routes (cross-tenant diagnostics inside one school). */
 export const requireSuperAdmin: RequestHandler = requireRole('SUPER_ADMIN');
+
+/**
+ * Platform-operator routes: creating schools, listing every school, opening
+ * another school's panel.
+ *
+ * Checked against the flag on the account rather than the role, so a school's
+ * own Super Admin — who is unrestricted *within* their school — still cannot
+ * see or touch anybody else's.
+ */
+export const requirePlatformAdmin: RequestHandler = (req, _res, next) => {
+  try {
+    const auth = requireAuth(req);
+    if (!auth.isPlatformAdmin) {
+      throw AppError.forbidden('This action is restricted to platform administrators');
+    }
+    next();
+  } catch (err) {
+    next(err);
+  }
+};
 
 /** Routes that manage the institution itself. */
 export const requireAdmin: RequestHandler = requireRole('SUPER_ADMIN', 'ADMIN');

@@ -417,6 +417,16 @@ model Tenant {
   subscriptionTier String  @default("STANDARD")
   subscriptionEndsAt DateTime?
 
+  /// PRD 6.3: location history is purged after this many days. Per school,
+  /// because retention is a policy each institution sets for itself.
+  locationRetentionDays Int @default(30)
+
+  /// Platform operator's note on this school — never shown inside its panel.
+  onboardingNotes String?
+  /// Set when a platform admin suspends the school; blocks every login.
+  suspendedAt     DateTime?
+  suspendedReason String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -518,6 +528,14 @@ model User {
   role         Role
   scope        DataScope @default(SELF)
 
+  /// Platform operator: may create schools and open any school's panel.
+  ///
+  /// Deliberately a flag rather than a role. A platform admin still holds a
+  /// normal role inside whichever school they are currently working in, so
+  /// every existing RBAC and tenant-scope check keeps working unchanged —
+  /// this only adds the right to switch which tenant that is.
+  isPlatformAdmin Boolean @default(false)
+
   firstName String
   lastName  String
   avatarUrl String?
@@ -617,6 +635,11 @@ model RefreshToken {
   /// Set when this token was superseded by a rotation.
   replacedByHash String?
 
+  /// School a platform admin has opened, if it is not their home tenant.
+  /// Carried across rotations so refreshing does not silently drop them back
+  /// into their own school mid-session.
+  actingTenantId String? @db.Uuid
+
   createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -674,6 +697,37 @@ model AuditLog {
   @@index([tenantId, actorId])
   @@index([module])
   @@map("audit_logs")
+}
+
+/// One execution of a background job.
+///
+/// Scheduled work that nobody can see is scheduled work nobody trusts. Every
+/// tick writes a row here so the Settings > Scheduler screen can show what ran,
+/// when, how long it took, what it touched, and what broke — and so a failing
+/// job surfaces as a red row instead of a silent gap in the logs.
+model JobRun {
+  id  String @id @default(uuid()) @db.Uuid
+  job String
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  durationMs Int?
+
+  /// RUNNING | SUCCESS | FAILED | SKIPPED
+  status String @default("RUNNING")
+
+  /// How many records the run acted on — invoices flagged, pings purged, …
+  affected Int     @default(0)
+  summary  String?
+  error    String?
+
+  /// Manual "Run now" from the admin screen, rather than the timer.
+  triggeredById String? @db.Uuid
+  manual        Boolean @default(false)
+
+  @@index([job, startedAt])
+  @@index([startedAt])
+  @@map("job_runs")
 }
 
 /// Third-party connector with credentials held in an encrypted blob
@@ -1292,9 +1346,15 @@ model StudentDocument {
   documentType String
   title        String
   fileUrl      String
+  /// Cloudinary public id + resource type, kept so the asset can be deleted
+  /// when the row is. Recoverable from the URL, but only unambiguously for
+  /// assets we uploaded ourselves — storing it avoids the guesswork.
+  filePublicId String?
+  fileResourceType String @default("image")
   fileSizeBytes Int?
   mimeType     String?
 
+  uploadedById String?   @db.Uuid
   isVerified   Boolean   @default(false)
   verifiedById String?   @db.Uuid
   verifiedAt   DateTime?
@@ -2293,6 +2353,8 @@ model EmployeeDocument {
   documentType String
   title        String
   fileUrl      String
+  filePublicId String?
+  fileResourceType String @default("image")
   expiresAt    DateTime?
   isVerified   Boolean   @default(false)
 

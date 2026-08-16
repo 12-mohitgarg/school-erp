@@ -26,6 +26,7 @@ import communicationRoutes from './communication/communication.routes.js';
 import reportsRoutes from './reports/reports.routes.js';
 import settingsRoutes from './settings/settings.routes.js';
 import dashboardRoutes from './dashboard/dashboard.routes.js';
+import platformRoutes from './platform/platform.routes.js';
 
 export function registerRoutes(app: Application): void {
   const prefix = env.API_PREFIX;
@@ -53,6 +54,10 @@ export function registerRoutes(app: Application): void {
   app.use(`${prefix}/communication`, authenticate, communicationRoutes);
   app.use(`${prefix}/reports`, authenticate, reportsRoutes);
   app.use(`${prefix}/settings`, authenticate, settingsRoutes);
+
+  // The control plane above the schools. Its own router gates every route on
+  // the platform-admin flag, so a school's Super Admin gets nothing from it.
+  app.use(`${prefix}/platform`, authenticate, platformRoutes);
 
   // Tracking mounts its own auth: the device-ingest endpoint authenticates
   // with a device token rather than a user JWT.

@@ -22,10 +22,13 @@ const log = moduleLogger('auth:tokens');
 export interface TokenSubject {
   userId: string;
   role: Role;
+  /** The school this token acts in — see `JwtPayload.tenantId`. */
   tenantId: string;
   branchId: string | null;
   scope: DataScope;
   sessionId: string;
+  /** True when `tenantId` is not the user's home tenant (platform admin). */
+  actingAsPlatformAdmin?: boolean;
 }
 
 export interface IssuedTokens {
@@ -53,6 +56,7 @@ export function signAccessToken(subject: TokenSubject): string {
     branchId: subject.branchId,
     scope: subject.scope,
     sid: subject.sessionId,
+    ...(subject.actingAsPlatformAdmin ? { pa: true as const } : {}),
   };
 
   const options: SignOptions = {
@@ -113,6 +117,7 @@ async function issueForFamily(
       userAgent: device.userAgent ?? null,
       ipAddress: device.ipAddress ?? null,
       deviceId: device.deviceId ?? null,
+      actingTenantId: subject.actingAsPlatformAdmin ? subject.tenantId : null,
     },
   });
 
@@ -152,6 +157,7 @@ export async function rotateRefreshToken(
           branchId: true,
           status: true,
           deletedAt: true,
+          isPlatformAdmin: true,
         },
       },
     },
@@ -178,13 +184,25 @@ export async function rotateRefreshToken(
     throw AppError.accountInactive();
   }
 
+  /*
+    Carry the opened school across the rotation, but re-check the right to be
+    there: a platform admin whose flag was revoked mid-session drops back to
+    their own school on the next refresh rather than keeping the access their
+    old token granted.
+  */
+  const actingTenantId =
+    user.isPlatformAdmin && stored.actingTenantId && stored.actingTenantId !== user.tenantId
+      ? stored.actingTenantId
+      : null;
+
   const subject: TokenSubject = {
     userId: user.id,
     role: user.role,
-    tenantId: user.tenantId,
-    branchId: user.branchId,
+    tenantId: actingTenantId ?? user.tenantId,
+    branchId: actingTenantId ? null : user.branchId,
     scope: user.scope,
     sessionId: stored.familyId,
+    ...(actingTenantId ? { actingAsPlatformAdmin: true } : {}),
   };
 
   const tokens = await issueForFamily(subject, stored.familyId, device, tokenHash);

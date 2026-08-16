@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { CalendarDays, Check, Lock, Save, UserX, Clock, AlertCircle } from 'lucide-react';
+import { CalendarDays, Check, Lock, Save } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   useAttendanceRegisterQuery, useMarkAttendanceMutation,
@@ -8,12 +8,13 @@ import {
 import { useAuth } from '@/features/auth/useAuth';
 import { errorMessage } from '@/lib/api';
 import {
-  Alert, Avatar, Badge, Button, Card, CardHeader, EmptyState,
+  Avatar, Badge, Button, Card, CardHeader, EmptyState,
   PageHeader, Select, Tabs, StatusBadge,
 } from '@/components/ui';
 import { StatCard, StatGrid } from '@/components/ui/StatCard';
 import { TrendChart } from '@/components/charts/Charts';
 import { cn, formatDate, percentage } from '@/lib/utils';
+import { StatRowSkeleton, ListSkeleton } from '@/components/ui/Skeletons';
 
 type Status = 'PRESENT' | 'ABSENT' | 'LATE' | 'HALF_DAY' | 'EXCUSED';
 
@@ -162,9 +163,12 @@ function Register({ canMark }: { canMark: boolean }) {
           />
         </Card>
       ) : isFetching ? (
-        <Card>
-          <EmptyState title="Loading register…" />
-        </Card>
+        <>
+          <StatRowSkeleton count={4} />
+          <Card className="mt-4">
+            <ListSkeleton rows={8} />
+          </Card>
+        </>
       ) : register ? (
         <>
           <StatGrid>

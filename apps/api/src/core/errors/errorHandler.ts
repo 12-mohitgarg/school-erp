@@ -3,7 +3,15 @@
 import type { ErrorRequestHandler, RequestHandler } from 'express';
 import { Prisma } from '@prisma/client';
 import { ZodError } from 'zod';
-import { JsonWebTokenError, TokenExpiredError } from 'jsonwebtoken';
+/*
+  `jsonwebtoken` is CommonJS. A named ESM import of its error classes type-checks
+  but throws at runtime under Node's ESM loader ("Named export not found"),
+  which took down the compiled `npm start` build while `tsx` masked it in dev.
+  Importing the default and destructuring is the form that works in both.
+*/
+import jsonwebtoken from 'jsonwebtoken';
+
+const { JsonWebTokenError, TokenExpiredError } = jsonwebtoken;
 import { AppError, type ErrorCode } from './AppError.js';
 import { logger } from '../logger.js';
 import { isProduction } from '../../config/env.js';

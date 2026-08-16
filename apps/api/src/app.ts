@@ -12,14 +12,13 @@ import cors from 'cors';
 import compression from 'compression';
 import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
-import { RedisStore } from 'rate-limit-redis';
 import crypto from 'node:crypto';
 import { env, isProduction } from './config/env.js';
 import { logger } from './core/logger.js';
 import { errorHandler, notFoundHandler } from './core/errors/errorHandler.js';
 import { AppError } from './core/errors/AppError.js';
 import { databaseHealthy } from './core/db/prisma.js';
-import { redis, redisHealthy, usingMemoryFallback } from './core/cache/redis.js';
+import { storeStats } from './core/cache/store.js';
 import { metricsHandler, metricsMiddleware } from './core/observability/metrics.js';
 import { registerRoutes } from './modules/index.js';
 
@@ -142,22 +141,11 @@ export function createApp(): Application {
   }
 
   // -- Rate limiting -------------------------------------------------------
-  // Backed by Redis when available so the limit is global rather than
-  // per-instance; falls back to the library's in-memory store otherwise.
   const limiter = rateLimit({
     windowMs: env.RATE_LIMIT_WINDOW_MS,
     max: env.RATE_LIMIT_MAX,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    ...(usingMemoryFallback
-      ? {}
-      : {
-          store: new RedisStore({
-            sendCommand: (...args: string[]) =>
-              redis.call(...(args as [string, ...string[]])) as never,
-            prefix: `${env.REDIS_KEY_PREFIX}rl:`,
-          }),
-        }),
     // Authenticated callers are limited per user, anonymous ones per IP.
     keyGenerator: (req) => req.auth?.userId ?? req.ip ?? 'unknown',
     skip: (req) => req.path === '/health' || req.path === '/metrics',
@@ -170,15 +158,15 @@ export function createApp(): Application {
 
   // -- Operational endpoints ----------------------------------------------
   app.get('/health', async (_req: Request, res: Response) => {
-    const [db, cache] = await Promise.all([databaseHealthy(), redisHealthy()]);
-    const healthy = db && cache;
+    const db = await databaseHealthy();
 
-    res.status(healthy ? 200 : 503).json({
-      status: healthy ? 'ok' : 'degraded',
+    res.status(db ? 200 : 503).json({
+      status: db ? 'ok' : 'degraded',
       uptimeSeconds: Math.floor(process.uptime()),
       timestamp: new Date().toISOString(),
       version: process.env['npm_package_version'] ?? '1.0.0',
-      checks: { database: db ? 'up' : 'down', redis: cache ? 'up' : 'down' },
+      checks: { database: db ? 'up' : 'down', cache: 'in-process' },
+      cache: storeStats(),
     });
   });
 

@@ -2,14 +2,15 @@
  * Resolves the full request context for an authenticated user: effective
  * permissions plus the identity links that bound their data scope.
  *
- * This is on the hot path for every request, so the result is cached in Redis
- * and invalidated whenever the user's role, grants or links change.
+ * This is on the hot path for every request, so the result is cached in the
+ * in-process store and invalidated whenever the user's role, grants or links
+ * change.
  */
 
 import { permissionsForRole, type Permission, type Role, type DataScope } from '@erp/shared';
 import type { RequestAuth } from '../../types/express.js';
 import { prisma } from '../db/prisma.js';
-import { cacheGet, cacheSet, keys, redis } from '../cache/redis.js';
+import { cacheGet, cacheSet, keys, store } from '../cache/store.js';
 import { AppError } from '../errors/AppError.js';
 
 /** Cached slice of the context — everything except the per-request session id. */
@@ -59,6 +60,7 @@ export async function loadUserContext(userId: string): Promise<CachedContext> {
       branchId: true,
       status: true,
       deletedAt: true,
+      isPlatformAdmin: true,
       extraPermissions: true,
       deniedPermissions: true,
       customRole: { select: { permissions: true, scope: true } },
@@ -91,7 +93,9 @@ export async function loadUserContext(userId: string): Promise<CachedContext> {
     permissions,
     scope: (user.customRole?.scope ?? user.scope) as DataScope,
     tenantId: user.tenantId,
+    homeTenantId: user.tenantId,
     branchId: user.branchId,
+    isPlatformAdmin: user.isPlatformAdmin,
     email: user.email,
     fullName: `${user.firstName} ${user.lastName}`.trim(),
   };
@@ -138,13 +142,13 @@ async function loadTeacherSections(employeeId: string): Promise<string[]> {
  * permissions, guardian links or teaching allocations.
  */
 export async function invalidateUserContext(userId: string): Promise<void> {
-  await redis.del(keys.userPermissions(userId));
+  await store.del(keys.userPermissions(userId));
 }
 
 /** Bulk invalidation, e.g. after editing a custom role that many users hold. */
 export async function invalidateManyContexts(userIds: string[]): Promise<void> {
   if (userIds.length === 0) return;
-  const pipeline = redis.pipeline();
+  const pipeline = store.pipeline();
   for (const id of userIds) pipeline.del(keys.userPermissions(id));
   await pipeline.exec();
 }

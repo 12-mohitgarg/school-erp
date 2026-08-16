@@ -34,19 +34,9 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-      redis:
-        image: redis:7-alpine
-        ports: ['6379:6379']
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     env:
       DATABASE_URL: postgresql://erp:erp_password@localhost:5432/school_erp_test?schema=public
       DIRECT_DATABASE_URL: postgresql://erp:erp_password@localhost:5432/school_erp_test?schema=public
-      REDIS_URL: redis://localhost:6379
       # Throwaway values — the config validator refuses to boot without them.
       JWT_ACCESS_SECRET: ci_access_secret_that_is_at_least_32_chars_long
       JWT_REFRESH_SECRET: ci_refresh_secret_that_is_at_least_32_chars_long

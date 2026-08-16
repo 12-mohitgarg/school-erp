@@ -6,19 +6,17 @@
  * explicit server-side authorisation check — a client cannot join a room by
  * naming it.
  *
- * The Redis adapter lets several API replicas fan out to the same rooms, which
- * is what makes the WebSocket tier horizontally scalable (PRD gap: NFRs).
+ * Fan-out uses Socket.IO's built-in in-process adapter, matching the
+ * single-process deployment the rest of the stack assumes.
  */
 
 import type { Server as HttpServer } from 'node:http';
 import { Server as SocketServer, type Socket } from 'socket.io';
-import { createAdapter } from '@socket.io/redis-adapter';
-import { WS_EVENTS, type Role, type DataScope } from '@erp/shared';
+import { WS_EVENTS, hasPermission, type Role, type DataScope } from '@erp/shared';
 import { env } from '../../config/env.js';
 import { moduleLogger } from '../logger.js';
 import { verifyAccessToken } from '../auth/tokens.js';
 import { loadUserContext } from '../auth/context.js';
-import { redisPub, redisSub } from '../cache/redis.js';
 import { prisma } from '../db/prisma.js';
 
 const log = moduleLogger('socket');
@@ -54,6 +52,8 @@ export const rooms = {
   user: (userId: string) => `user:${userId}`,
   role: (tenantId: string, role: Role) => `role:${tenantId}:${role}`,
   vehicle: (vehicleId: string) => `vehicle:${vehicleId}`,
+  /** Every vehicle in one school. Staff with tracking access only. */
+  fleet: (tenantId: string) => `fleet:${tenantId}`,
   trip: (tripId: string) => `trip:${tripId}`,
   student: (studentId: string) => `student:${studentId}`,
   conversation: (conversationId: string) => `conversation:${conversationId}`,
@@ -74,14 +74,6 @@ export function initSocketServer(httpServer: HttpServer): SocketServer {
     transports: ['websocket', 'polling'],
     maxHttpBufferSize: 1e6,
   });
-
-  // Without a real Redis the default in-memory adapter is used, which confines
-  // fan-out to this process. Fine for one replica, wrong for several.
-  if (redisPub && redisSub) {
-    io.adapter(createAdapter(redisPub, redisSub));
-  } else {
-    log.warn('No Redis adapter — WebSocket fan-out is limited to this process');
-  }
 
   io.use(authenticateSocket);
   io.on('connection', handleConnection);
@@ -160,6 +152,10 @@ function handleConnection(socket: Socket): void {
     void subscribeStudent(socket, String(studentId));
   });
 
+  socket.on(WS_EVENTS.SUBSCRIBE_FLEET, () => {
+    subscribeFleet(socket);
+  });
+
   socket.on(WS_EVENTS.UNSUBSCRIBE, (room: unknown) => {
     void socket.leave(String(room));
   });
@@ -224,6 +220,31 @@ async function guardianMayWatchVehicle(
   return allocation !== null;
 }
 
+/**
+ * Join the school-wide fleet feed.
+ *
+ * Two conditions, both required: the caller must hold `tracking:view`, and
+ * their data scope must span at least a branch. A guardian has `tracking:view`
+ * but CHILDREN scope, so they are correctly refused here and must subscribe to
+ * the specific vehicle carrying their child instead (PRD 6.3 — location is
+ * visible only to the verified guardian *of that child* and to school staff).
+ */
+function subscribeFleet(socket: Socket): void {
+  const auth = socket.auth;
+  if (!auth) return;
+
+  const scopeAllows = auth.scope === 'TENANT' || auth.scope === 'BRANCH';
+  const permitted = scopeAllows && hasPermission(auth.permissions, 'tracking:view');
+
+  if (!permitted) {
+    socket.emit(WS_EVENTS.ERROR, { message: 'Not authorised for fleet tracking' });
+    return;
+  }
+
+  void socket.join(rooms.fleet(auth.tenantId));
+  log.debug({ userId: auth.userId, tenantId: auth.tenantId }, 'Subscribed to fleet');
+}
+
 async function subscribeStudent(socket: Socket, studentId: string): Promise<void> {
   const auth = socket.auth;
   if (!auth) return;
@@ -264,6 +285,11 @@ export function emitToTenant(tenantId: string, event: string, payload: unknown):
 
 export function emitToVehicle(vehicleId: string, event: string, payload: unknown): void {
   io?.to(rooms.vehicle(vehicleId)).emit(event, payload);
+}
+
+/** Broadcast to the school's safety dashboard — staff with tracking access. */
+export function emitToFleet(tenantId: string, event: string, payload: unknown): void {
+  io?.to(rooms.fleet(tenantId)).emit(event, payload);
 }
 
 export function emitToStudent(studentId: string, event: string, payload: unknown): void {

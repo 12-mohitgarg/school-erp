@@ -1,6 +1,6 @@
 /** Student Management business logic. */
 
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { documentNumber } from '@erp/shared';
 import type { RequestAuth } from '../../types/express.js';
 import { prisma } from '../../core/db/prisma.js';
@@ -599,19 +599,165 @@ export async function createApplication(
   branchId: string,
   input: Record<string, unknown>,
 ) {
-  const count = await prisma.admissionApplication.count({ where: { tenantId } });
-  const applicationNo = `APP-${new Date().getFullYear()}-${String(count + 1).padStart(5, '0')}`;
-
   const { branchId: _b, ...fields } = input;
+  const year = new Date().getFullYear();
 
-  return prisma.admissionApplication.create({
-    data: {
-      ...(fields as object),
-      tenantId,
-      branchId,
-      applicationNo,
-    } as Prisma.AdmissionApplicationUncheckedCreateInput,
+  /*
+    `count + 1` is not a safe sequence: two enquiries captured in the same
+    second at a busy front office both read the same count and the second
+    insert violates the (tenantId, applicationNo) unique constraint. Retrying
+    on that specific collision keeps the numbers human-readable and sequential
+    without needing a separate counter table.
+  */
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const count = await prisma.admissionApplication.count({
+      where: { tenantId, applicationNo: { startsWith: `APP-${year}-` } },
+    });
+    const applicationNo = `APP-${year}-${String(count + 1 + attempt).padStart(5, '0')}`;
+
+    try {
+      return await prisma.admissionApplication.create({
+        data: {
+          ...(fields as object),
+          tenantId,
+          branchId,
+          applicationNo,
+        } as Prisma.AdmissionApplicationUncheckedCreateInput,
+      });
+    } catch (err) {
+      const isCollision =
+        err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
+      if (!isCollision || attempt === 4) throw err;
+    }
+  }
+
+  // Unreachable: the loop either returns or rethrows on the final attempt.
+  throw AppError.conflict('Could not allocate an application number. Please retry.');
+}
+
+/** Counts per funnel stage, for the admissions dashboard. */
+export async function admissionFunnel(
+  tenantId: string,
+  branchId?: string,
+): Promise<{ stages: Record<string, number>; total: number; convertedThisYear: number }> {
+  const where = { tenantId, ...(branchId ? { branchId } : {}) };
+
+  const [grouped, total, converted] = await Promise.all([
+    prisma.admissionApplication.groupBy({
+      by: ['status'],
+      where,
+      _count: { _all: true },
+    }),
+    prisma.admissionApplication.count({ where }),
+    prisma.admissionApplication.count({
+      where: {
+        ...where,
+        status: 'ENROLLED',
+        updatedAt: { gte: new Date(new Date().getFullYear(), 0, 1) },
+      },
+    }),
+  ]);
+
+  const stages: Record<string, number> = {
+    ENQUIRY: 0,
+    APPLIED: 0,
+    DOCUMENTS_PENDING: 0,
+    VERIFIED: 0,
+    APPROVED: 0,
+    ENROLLED: 0,
+    REJECTED: 0,
+    WITHDRAWN: 0,
+  };
+  for (const row of grouped) stages[row.status] = row._count._all;
+
+  return { stages, total, convertedThisYear: converted };
+}
+
+export interface EnrolApplicationInput {
+  classId: string;
+  sectionId: string;
+  academicYearId?: string | undefined;
+  admissionDate?: Date | undefined;
+  rollNumber?: string | undefined;
+  guardianRelation?: string | undefined;
+}
+
+/**
+ * Convert an approved application into a real student.
+ *
+ * This is the step the admissions funnel existed for and did not have: setting
+ * the status to ENROLLED used to be a label change and nothing more, so the
+ * "enrolled" applicant had no student record, no class, no guardian and no
+ * invoice. Here the application's own data becomes the student, the guardian
+ * on the enquiry becomes a linked primary contact, and the application is
+ * stamped with the student it produced so the funnel can be reported on
+ * end to end.
+ */
+export async function enrolApplication(
+  auth: RequestAuth,
+  applicationId: string,
+  input: EnrolApplicationInput,
+) {
+  const application = await prisma.admissionApplication.findFirst({
+    where: { id: applicationId, tenantId: auth.tenantId },
   });
+
+  if (!application) throw AppError.notFound('Application');
+
+  if (application.enrolledStudentId) {
+    throw AppError.conflict('This application has already been converted to a student');
+  }
+
+  if (application.status === 'REJECTED' || application.status === 'WITHDRAWN') {
+    throw AppError.conflict(
+      `A ${application.status.toLowerCase()} application cannot be enrolled. Reopen it first.`,
+    );
+  }
+
+  // Split the guardian's single name field the way the front office entered it.
+  const nameParts = application.guardianName.trim().split(/\s+/);
+  const guardianFirst = nameParts[0] ?? application.guardianName;
+  const guardianLast = nameParts.slice(1).join(' ') || guardianFirst;
+
+  const student = await admitStudent(auth, application.branchId, {
+    firstName: application.firstName,
+    lastName: application.lastName,
+    dateOfBirth: application.dateOfBirth,
+    gender: application.gender,
+    admissionDate: input.admissionDate ?? new Date(),
+    classId: input.classId,
+    sectionId: input.sectionId,
+    ...(input.academicYearId ? { academicYearId: input.academicYearId } : {}),
+    ...(input.rollNumber ? { rollNumber: input.rollNumber } : {}),
+    guardians: [
+      {
+        firstName: guardianFirst,
+        lastName: guardianLast,
+        phone: application.guardianPhone,
+        ...(application.guardianEmail ? { email: application.guardianEmail } : {}),
+        relation: input.guardianRelation ?? 'GUARDIAN',
+        // The guardian named on the enquiry is, by definition, the one the
+        // school has been dealing with — so they become the primary contact.
+        custody: 'PRIMARY',
+        isPrimaryContact: true,
+        // The guardian gets an app invite as part of onboarding — the whole
+        // point of capturing their contact details at enquiry time.
+        sendInvite: Boolean(application.guardianEmail || application.guardianPhone),
+      },
+    ],
+  });
+
+  const updated = await prisma.admissionApplication.update({
+    where: { id: applicationId },
+    data: {
+      status: 'ENROLLED',
+      enrolledStudentId: student.id,
+      reviewedById: auth.userId,
+      reviewedAt: new Date(),
+    },
+  });
+
+  return { application: updated, student };
 }
 
 // ---------------------------------------------------------------------------

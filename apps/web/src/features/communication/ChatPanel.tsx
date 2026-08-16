@@ -9,8 +9,9 @@ import { useConversationStream } from '@/lib/useRealtime';
 import { useAppSelector } from '@/store';
 import { errorMessage } from '@/lib/api';
 import { Combobox } from '@/components/forms/Combobox';
-import { Avatar, Button, Card, EmptyState, Modal, Spinner } from '@/components/ui';
+import { Avatar, Button, Card, EmptyState, Modal } from '@/components/ui';
 import { cn, initials, relativeTime } from '@/lib/utils';
+import { ListSkeleton, Skeleton, SkeletonRegion } from '@/components/ui/Skeletons';
 
 interface ChatMessage {
   id: string;
@@ -221,7 +222,7 @@ export function ChatPanel() {
 
           <div className="min-h-0 flex-1 overflow-y-auto">
             {loadingThreads ? (
-              <div className="flex justify-center py-10"><Spinner className="text-brand-600" /></div>
+              <ListSkeleton rows={6} />
             ) : threads.length === 0 ? (
               <EmptyState
                 icon={<MessageSquare className="h-5 w-5" aria-hidden="true" />}
@@ -317,7 +318,7 @@ export function ChatPanel() {
               {/* Messages */}
               <div className="min-h-0 flex-1 space-y-1 overflow-y-auto bg-surface-sunken/30 px-4 py-4">
                 {loadingMessages && messages.length === 0 ? (
-                  <div className="flex justify-center py-10"><Spinner className="text-brand-600" /></div>
+                  <MessageStreamSkeleton />
                 ) : messages.length === 0 ? (
                   <p className="py-10 text-center text-sm text-ink-subtle">
                     No messages yet. Say hello.
@@ -429,5 +430,31 @@ export function ChatPanel() {
         </section>
       </Card>
     </>
+  );
+}
+
+/**
+ * Alternating chat bubbles.
+ *
+ * A generic list placeholder reads as a broken thread here; staggered bubbles
+ * of uneven width read unmistakably as messages still arriving.
+ */
+function MessageStreamSkeleton() {
+  const bubbles = [
+    { mine: false, width: 'w-2/5' },
+    { mine: true, width: 'w-1/3' },
+    { mine: false, width: 'w-1/2' },
+    { mine: false, width: 'w-1/4' },
+    { mine: true, width: 'w-2/5' },
+  ];
+
+  return (
+    <SkeletonRegion label="Loading messages" className="space-y-3 py-2">
+      {bubbles.map((bubble, i) => (
+        <div key={i} className={bubble.mine ? 'flex justify-end' : 'flex justify-start'}>
+          <Skeleton className={`h-10 rounded-2xl ${bubble.width}`} />
+        </div>
+      ))}
+    </SkeletonRegion>
   );
 }

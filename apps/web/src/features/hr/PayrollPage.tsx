@@ -5,7 +5,7 @@ import { usePayslipsQuery, useRunPayrollMutation, useReportHrQuery } from '@/fea
 import { useListState } from '@/lib/useListState';
 import { useAuth } from '@/features/auth/useAuth';
 import { errorMessage } from '@/lib/api';
-import { Button, Card, PageHeader, Pagination, Table, StatusBadge, type Column } from '@/components/ui';
+import { Button, Card, PageHeader, Pagination, Table, type Column } from '@/components/ui';
 import { StatCard, StatGrid } from '@/components/ui/StatCard';
 import { formatCompactCurrency } from '@/lib/utils';
 

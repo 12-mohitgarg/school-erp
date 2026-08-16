@@ -1,9 +1,20 @@
 import { useState } from 'react';
-import { Building2, Plug, ScrollText, ShieldCheck } from 'lucide-react';
-import { useInstitutionQuery, useIntegrationsQuery, usePermissionCatalogueQuery, useAuditLogQuery } from '@/features/api/endpoints';
+import { Building2, Plug, ShieldCheck } from 'lucide-react';
+import {
+  useInstitutionQuery, useIntegrationsQuery, usePermissionCatalogueQuery, useAuditLogQuery,
+  useUpdateInstitutionMutation,
+} from '@/features/api/endpoints';
 import { useListState } from '@/lib/useListState';
-import { Badge, Card, CardBody, CardHeader, EmptyState, PageHeader, Pagination, Table, Tabs, type Column } from '@/components/ui';
+import {
+  Badge, Button, Card, CardBody, CardHeader, EmptyState, Input, PageHeader, Pagination,
+  Table, Tabs, type Column,
+} from '@/components/ui';
+import { ImageUpload } from '@/components/forms/FileUpload';
+import { useAuth } from '@/features/auth/useAuth';
+import { errorMessage } from '@/lib/api';
+import { toast } from 'sonner';
 import { formatDateTime } from '@/lib/utils';
+import { CardSkeleton } from '@/components/ui/Skeletons';
 
 type Tab = 'institution' | 'roles' | 'integrations' | 'audit';
 
@@ -36,9 +47,40 @@ export default function SettingsPage() {
 
 function Institution() {
   const { data } = useInstitutionQuery();
-  if (!data) return <Card><EmptyState title="Loading…" /></Card>;
+  const { can } = useAuth();
+  const [updateInstitution, { isLoading: saving }] = useUpdateInstitutionMutation();
+
+  const [retention, setRetention] = useState<string>('');
+
+  if (!data) return <CardSkeleton lines={8} />;
 
   const branches = (data['branches'] ?? []) as Array<Record<string, unknown>>;
+  const canEdit = can('settings:update');
+  const currentRetention = Number(data['locationRetentionDays'] ?? 30);
+
+  async function saveLogo(url: string | null) {
+    try {
+      await updateInstitution({ logoUrl: url }).unwrap();
+      toast.success(url ? 'Logo updated' : 'Logo removed');
+    } catch (err) {
+      toast.error('Could not save the logo', { description: errorMessage(err) });
+    }
+  }
+
+  async function saveRetention() {
+    const days = Number(retention);
+    if (!Number.isInteger(days) || days < 1 || days > 365) {
+      toast.error('Retention must be between 1 and 365 days');
+      return;
+    }
+    try {
+      await updateInstitution({ locationRetentionDays: days }).unwrap();
+      setRetention('');
+      toast.success(`GPS history will now be kept for ${days} days`);
+    } catch (err) {
+      toast.error('Could not update retention', { description: errorMessage(err) });
+    }
+  }
 
   const fields: Array<[string, string]> = [
     ['Name', String(data['name'] ?? '—')],
@@ -68,28 +110,94 @@ function Institution() {
         </CardBody>
       </Card>
 
-      <Card>
-        <CardHeader title="Branches" description={`${branches.length} campus${branches.length === 1 ? '' : 'es'}`} />
-        <ul className="divide-y divide-hairline">
-          {branches.map((branch) => (
-            <li key={String(branch['id'])} className="flex items-start gap-2.5 px-5 py-3">
-              <Building2 className="mt-0.5 h-4 w-4 shrink-0 text-ink-subtle" aria-hidden="true" />
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium text-ink">{String(branch['name'])}</p>
-                <p className="truncate text-xs text-ink-subtle">{String(branch['city'] ?? '')}</p>
+      <div className="space-y-4">
+        <Card>
+          <CardHeader
+            title="Branding"
+            description="Shown on the sign-in screen, receipts and report cards"
+          />
+          <CardBody>
+            <ImageUpload
+              value={data['logoUrl'] as string | null}
+              onChange={(asset) => saveLogo(asset?.url ?? null)}
+              folder="branding"
+              label="School logo"
+              hint="Square PNG or SVG works best."
+              size={80}
+              disabled={!canEdit}
+            />
+          </CardBody>
+        </Card>
+
+        {/*
+          PRD §6.3 makes location retention a per-school policy, so it belongs
+          in the school's own settings rather than in a server environment
+          variable. The nightly purge job reads this value per tenant.
+        */}
+        <Card>
+          <CardHeader
+            title="Location retention"
+            description="How long GPS history is kept before it is purged"
+          />
+          <CardBody>
+            <p className="text-sm text-ink">
+              Currently <span className="font-semibold nums">{currentRetention}</span> days.
+            </p>
+            {canEdit && (
+              <div className="mt-3 flex items-end gap-2">
+                <Input
+                  type="number"
+                  min={1}
+                  max={365}
+                  label="New window (days)"
+                  placeholder={String(currentRetention)}
+                  value={retention}
+                  onChange={(e) => setRetention(e.target.value)}
+                  wrapperClassName="mb-0 w-40"
+                />
+                <Button size="sm" loading={saving} disabled={!retention} onClick={() => void saveRetention()}>
+                  Save
+                </Button>
               </div>
-              {branch['isHeadOffice'] ? <Badge tone="brand">Head office</Badge> : null}
-            </li>
-          ))}
-        </ul>
-      </Card>
+            )}
+            <p className="mt-2 text-2xs text-ink-subtle">
+              Pings and geofence events older than this are deleted by the nightly purge. Access
+              logs — the record of who viewed a location — are kept regardless.
+            </p>
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardHeader title="Branches" description={`${branches.length} campus${branches.length === 1 ? '' : 'es'}`} />
+          <ul className="divide-y divide-hairline">
+            {branches.map((branch) => (
+              <li key={String(branch['id'])} className="flex items-start gap-2.5 px-5 py-3">
+                <Building2 className="mt-0.5 h-4 w-4 shrink-0 text-ink-subtle" aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium text-ink">{String(branch['name'])}</p>
+                  <p className="truncate text-xs text-ink-subtle">{String(branch['city'] ?? '')}</p>
+                </div>
+                {branch['isHeadOffice'] ? <Badge tone="brand">Head office</Badge> : null}
+              </li>
+            ))}
+          </ul>
+        </Card>
+      </div>
     </div>
   );
 }
 
 function RolesMatrix() {
   const { data } = usePermissionCatalogueQuery();
-  if (!data) return <Card><EmptyState title="Loading…" /></Card>;
+  if (!data) {
+    return (
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        {Array.from({ length: 6 }, (_, i) => (
+          <CardSkeleton key={i} lines={4} />
+        ))}
+      </div>
+    );
+  }
 
   return (
     <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">

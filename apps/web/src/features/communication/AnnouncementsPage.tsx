@@ -6,6 +6,7 @@ import { useAuth } from '@/features/auth/useAuth';
 import { errorMessage } from '@/lib/api';
 import { Avatar, Badge, Button, Card, EmptyState, Input, Modal, PageHeader, Select, Textarea, Checkbox } from '@/components/ui';
 import { relativeTime } from '@/lib/utils';
+import { CardSkeleton } from '@/components/ui/Skeletons';
 
 export default function AnnouncementsPage() {
   const { can } = useAuth();
@@ -54,7 +55,11 @@ export default function AnnouncementsPage() {
       />
 
       {isLoading ? (
-        <Card><EmptyState title="Loading…" /></Card>
+        <div className="space-y-3">
+          <CardSkeleton lines={3} />
+          <CardSkeleton lines={2} />
+          <CardSkeleton lines={3} />
+        </div>
       ) : !data || data.items.length === 0 ? (
         <Card>
           <EmptyState icon={<Megaphone className="h-5 w-5" aria-hidden="true" />} title="No announcements yet" description="Publish a notice to reach parents, students and staff." />

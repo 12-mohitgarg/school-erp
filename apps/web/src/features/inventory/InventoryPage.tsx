@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Package, Plus, AlertTriangle } from 'lucide-react';
+import { Plus, AlertTriangle } from 'lucide-react';
 import { useInventoryItemsQuery, useAssetsQuery, useVendorsQuery } from '@/features/api/endpoints';
 import { useCreateInventoryItemMutation, useCreateAssetMutation, useCreateVendorMutation } from '@/features/api/mutations';
 import { useListState } from '@/lib/useListState';

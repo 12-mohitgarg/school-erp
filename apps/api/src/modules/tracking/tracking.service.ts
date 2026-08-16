@@ -21,12 +21,13 @@ import {
   type StopEta,
 } from '@erp/shared';
 import { prisma } from '../../core/db/prisma.js';
-import { redis, keys } from '../../core/cache/redis.js';
+import { store, keys } from '../../core/cache/store.js';
 import { env } from '../../config/env.js';
 import { moduleLogger } from '../../core/logger.js';
 import { AppError } from '../../core/errors/AppError.js';
 import {
   emitToVehicle,
+  emitToFleet,
   emitToStudent,
   emitToTenant,
   emitToUsers,
@@ -129,9 +130,17 @@ export async function ingestLocation(
 
     await cacheLivePosition(vehicleId, tenantId, trip?.id ?? null, input);
 
-    // Push to every subscriber before running the (slower) alert evaluation,
-    // so the map stays responsive.
-    emitToVehicle(vehicleId, WS_EVENTS.LOCATION_UPDATE, {
+    /*
+      Push to every subscriber before running the (slower) alert evaluation,
+      so the map stays responsive.
+
+      Two audiences, two rooms. `vehicle:{id}` is what a guardian watching
+      their child's bus joins; `fleet:{tenantId}` is the school's safety
+      dashboard, which needs all vehicles at once and would otherwise have to
+      poll. Sending the same payload to both keeps one code path, and the join
+      rules on each room keep the privacy boundary where PRD 6.3 puts it.
+    */
+    const position = {
       vehicleId,
       tripId: trip?.id ?? null,
       latitude: input.latitude,
@@ -140,7 +149,10 @@ export async function ingestLocation(
       heading: input.heading,
       accuracy: input.accuracyMeters ?? 0,
       timestamp: input.recordedAt.toISOString(),
-    });
+    };
+
+    emitToVehicle(vehicleId, WS_EVENTS.LOCATION_UPDATE, position);
+    emitToFleet(tenantId, WS_EVENTS.LOCATION_UPDATE, position);
 
     // Alerting is best-effort — never let it discard a stored position.
     try {
@@ -163,7 +175,7 @@ export async function ingestLocation(
   }
 }
 
-/** Keep the last-known position and a short trail in Redis for instant reads. */
+/** Keep the last-known position and a short trail cached for instant reads. */
 async function cacheLivePosition(
   vehicleId: string,
   tenantId: string,
@@ -183,7 +195,7 @@ async function cacheLivePosition(
 
   const trailKey = keys.vehicleTrail(vehicleId);
 
-  await redis
+  await store
     .pipeline()
     .setex(keys.liveVehicle(vehicleId), LIVE_TTL_SECONDS, payload)
     .lpush(trailKey, `${input.latitude},${input.longitude}`)
@@ -200,8 +212,8 @@ async function cacheLivePosition(
 /**
  * Edge-triggered geofence evaluation.
  *
- * We store the previous inside/outside state per (vehicle, fence) in Redis and
- * only raise an event when it flips. Without this, a bus parked inside the
+ * We store the previous inside/outside state per (vehicle, fence) and only
+ * raise an event when it flips. Without this, a bus parked inside the
  * school fence would emit an ENTRY alert every 12 seconds.
  */
 async function evaluateGeofences(
@@ -234,26 +246,26 @@ async function evaluateGeofences(
     const inside = pointInFence(point, fence);
     const stateKey = keys.geofenceState(vehicleId, fence.id);
 
-    const previous = await redis.get(stateKey);
+    const previous = await store.get(stateKey);
     const wasInside = previous === '1';
 
     // First sighting: record the state without firing an event.
     if (previous === null) {
-      await redis.setex(stateKey, 86_400, inside ? '1' : '0');
+      await store.setex(stateKey, 86_400, inside ? '1' : '0');
       continue;
     }
 
     if (inside === wasInside) continue;
 
-    await redis.setex(stateKey, 86_400, inside ? '1' : '0');
+    await store.setex(stateKey, 86_400, inside ? '1' : '0');
 
     const eventType = inside ? 'ENTRY' : 'EXIT';
     if ((inside && !fence.notifyOnEntry) || (!inside && !fence.notifyOnExit)) continue;
 
     // Cooldown suppresses flapping at a fence boundary.
     const cooldownKey = keys.geofenceCooldown(vehicleId, fence.id);
-    if (await redis.get(cooldownKey)) continue;
-    await redis.setex(cooldownKey, fence.cooldownMinutes * 60, '1');
+    if (await store.get(cooldownKey)) continue;
+    await store.setex(cooldownKey, fence.cooldownMinutes * 60, '1');
 
     await raiseGeofenceEvent(tenantId, fence, vehicleId, tripId, eventType, point, input.speedKmph);
   }
@@ -401,8 +413,8 @@ async function evaluateSpeed(
 
   // One overspeed alert per vehicle per 5 minutes, not one per ping.
   const cooldownKey = `speed:cool:${vehicleId}`;
-  if (await redis.get(cooldownKey)) return;
-  await redis.setex(cooldownKey, 300, '1');
+  if (await store.get(cooldownKey)) return;
+  await store.setex(cooldownKey, 300, '1');
 
   await raiseSafetyAlert({
     tenantId,
@@ -441,8 +453,8 @@ async function evaluateRouteDeviation(
   if (deviation <= env.ROUTE_DEVIATION_METERS) return;
 
   const cooldownKey = `dev:cool:${vehicleId}`;
-  if (await redis.get(cooldownKey)) return;
-  await redis.setex(cooldownKey, 600, '1');
+  if (await store.get(cooldownKey)) return;
+  await store.setex(cooldownKey, 600, '1');
 
   await raiseSafetyAlert({
     tenantId,
@@ -845,7 +857,7 @@ export async function getLiveVehicle(
 
   if (!vehicle) throw AppError.notFound('Vehicle');
 
-  const cachedRaw = await redis.get(keys.liveVehicle(vehicleId));
+  const cachedRaw = await store.get(keys.liveVehicle(vehicleId));
 
   let position: {
     latitude: number;
@@ -984,7 +996,7 @@ export async function getStudentLiveView(tenantId: string, studentId: string) {
     };
   });
 
-  const trail = await redis.lrange(keys.vehicleTrail(allocation.route.vehicleId), 0, -1);
+  const trail = await store.lrange(keys.vehicleTrail(allocation.route.vehicleId), 0, -1);
 
   return {
     tracked: true as const,
