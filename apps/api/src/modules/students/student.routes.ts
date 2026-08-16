@@ -33,6 +33,11 @@ import {
 import { auditFromRequest, diffRecords } from '../../core/audit/audit.service.js';
 import { AppError } from '../../core/errors/AppError.js';
 import { prisma } from '../../core/db/prisma.js';
+import {
+  assertStorableUrl,
+  destroyAsset,
+  publicIdFromUrl,
+} from '../../core/storage/cloudinary.js';
 import * as service from './student.service.js';
 
 const router = Router();
@@ -442,6 +447,8 @@ router.post(
       ]),
       title: z.string().trim().min(1).max(160),
       fileUrl: z.string().url().max(500),
+      filePublicId: z.string().max(300).optional(),
+      fileResourceType: z.enum(['image', 'raw', 'video']).default('image'),
       mimeType: z.string().max(120).optional(),
       fileSizeBytes: z.coerce.number().int().positive().optional(),
       expiresAt: dateOnly.optional(),
@@ -452,11 +459,76 @@ router.post(
     const studentId = req.params['id']!;
     assertStudentAccess(auth, studentId);
 
+    const body = req.body as Validated & { fileUrl: string };
+
+    /*
+      The browser uploads straight to Cloudinary and sends us the resulting
+      URL, so the URL is client-supplied. Checking it belongs to our own cloud
+      is what stops this table from becoming a list of arbitrary attacker-chosen
+      links rendered inside the admin UI.
+    */
+    assertStorableUrl(body.fileUrl);
+
     const doc = await prisma.studentDocument.create({
-      data: { studentId, ...(req.body as Validated) },
+      data: { studentId, uploadedById: auth.userId, ...(body as object) } as never,
+    });
+
+    await auditFromRequest(req, {
+      action: 'CREATE',
+      module: 'student',
+      entityType: 'StudentDocument',
+      entityId: doc.id,
+      after: { documentType: doc.documentType, title: doc.title },
     });
 
     return created(res, doc);
+  }),
+);
+
+/**
+ * Delete a document, and the stored file with it.
+ *
+ * Removing the row while leaving the asset in Cloudinary would quietly build
+ * up an orphaned store of children's identity documents that nothing tracks —
+ * exactly the kind of residue the DPDP erasure workflow has to be able to
+ * clear. The asset delete is best-effort: a storage failure must not block
+ * removing the record.
+ */
+router.delete(
+  '/documents/:docId',
+  requirePermission('student:delete'),
+  validate({ params: z.object({ docId: uuidSchema }) }),
+  asyncHandler(async (req, res) => {
+    const { auth } = scopedRequest(req);
+
+    const doc = await prisma.studentDocument.findFirst({
+      where: { id: req.params['docId']!, student: { tenantId: auth.tenantId } },
+      select: {
+        id: true,
+        title: true,
+        fileUrl: true,
+        filePublicId: true,
+        fileResourceType: true,
+      },
+    });
+    if (!doc) throw AppError.notFound('Document');
+
+    await prisma.studentDocument.delete({ where: { id: doc.id } });
+
+    const publicId = doc.filePublicId ?? publicIdFromUrl(doc.fileUrl);
+    if (publicId) {
+      await destroyAsset(publicId, doc.fileResourceType as 'image' | 'raw' | 'video');
+    }
+
+    await auditFromRequest(req, {
+      action: 'DELETE',
+      module: 'student',
+      entityType: 'StudentDocument',
+      entityId: doc.id,
+      before: { title: doc.title },
+    });
+
+    return ok(res, { deleted: true });
   }),
 );
 
@@ -470,8 +542,14 @@ router.post(
   asyncHandler(async (req, res) => {
     const auth = requireAuth(req);
 
+    const existing = await prisma.studentDocument.findFirst({
+      where: { id: req.params['docId']!, student: { tenantId: auth.tenantId } },
+      select: { id: true },
+    });
+    if (!existing) throw AppError.notFound('Document');
+
     const doc = await prisma.studentDocument.update({
-      where: { id: req.params['docId']! },
+      where: { id: existing.id },
       data: {
         isVerified: true,
         verifiedById: auth.userId,
@@ -567,44 +645,125 @@ router.patch(
   validate({
     params: idParam,
     body: z.object({
-      status: z.enum([
-        'ENQUIRY',
-        'APPLIED',
-        'DOCUMENTS_PENDING',
-        'VERIFIED',
-        'APPROVED',
-        'ENROLLED',
-        'REJECTED',
-        'WITHDRAWN',
-      ]),
+      status: z
+        .enum([
+          'ENQUIRY',
+          'APPLIED',
+          'DOCUMENTS_PENDING',
+          'VERIFIED',
+          'APPROVED',
+          'REJECTED',
+          'WITHDRAWN',
+        ])
+        .optional(),
       rejectionReason: z.string().max(500).optional(),
       notes: z.string().max(1000).optional(),
+      appliedForClassId: uuidSchema.nullish(),
+      previousSchool: z.string().max(200).optional(),
+      guardianName: z.string().trim().min(1).max(120).optional(),
+      guardianPhone: phoneSchema.optional(),
+      guardianEmail: emailSchema.optional(),
     }),
   }),
   asyncHandler(async (req, res) => {
     const auth = requireAuth(req);
-    const body = req.body as { status: string; rejectionReason?: string; notes?: string };
+    const body = req.body as Record<string, unknown>;
+
+    /*
+      Scoped by tenant, not just by id. Fetching on the primary key alone let a
+      token from one school patch another school's application, because the id
+      was the only thing checked.
+    */
+    const existing = await prisma.admissionApplication.findFirst({
+      where: { id: req.params['id']!, tenantId: auth.tenantId },
+    });
+    if (!existing) throw AppError.notFound('Application');
+
+    if (existing.status === 'ENROLLED') {
+      throw AppError.conflict(
+        'This application has been enrolled. Edit the student record instead.',
+      );
+    }
+
+    // ENROLLED is reachable only through the conversion endpoint below, which
+    // actually creates the student. Allowing it here would leave the funnel
+    // claiming an enrolment that produced no student record.
+    const status = body['status'] as string | undefined;
 
     const updated = await prisma.admissionApplication.update({
-      where: { id: req.params['id']! },
+      where: { id: existing.id },
       data: {
-        status: body.status as never,
-        rejectionReason: body.rejectionReason ?? null,
-        notes: body.notes ?? undefined,
-        reviewedById: auth.userId,
-        reviewedAt: new Date(),
-      },
+        ...(body as object),
+        // Only overwrite the rejection reason when rejecting; a later note
+        // edit must not silently erase why the application was turned down.
+        ...(status === 'REJECTED'
+          ? { rejectionReason: (body['rejectionReason'] as string) ?? existing.rejectionReason }
+          : {}),
+        ...(status ? { reviewedById: auth.userId, reviewedAt: new Date() } : {}),
+      } as never,
     });
 
     await auditFromRequest(req, {
-      action: body.status === 'APPROVED' ? 'APPROVE' : 'UPDATE',
+      action: status === 'APPROVED' ? 'APPROVE' : status === 'REJECTED' ? 'REJECT' : 'UPDATE',
       module: 'student',
       entityType: 'AdmissionApplication',
       entityId: updated.id,
-      after: { status: body.status },
+      before: { status: existing.status },
+      after: body,
     });
 
     return ok(res, updated);
+  }),
+);
+
+/**
+ * Convert an approved application into an enrolled student.
+ *
+ * Kept separate from the status PATCH deliberately: this one has side effects
+ * — a student record, an enrolment row and a linked guardian — and needs the
+ * class and section that the status change has no business asking for.
+ */
+router.post(
+  '/admissions/applications/:id/enroll',
+  requirePermission('student:create'),
+  validate({
+    params: idParam,
+    body: z.object({
+      classId: uuidSchema,
+      sectionId: uuidSchema,
+      academicYearId: uuidSchema.optional(),
+      admissionDate: dateOnly.optional(),
+      rollNumber: z.string().max(20).optional(),
+      guardianRelation: z
+        .enum(['FATHER', 'MOTHER', 'GUARDIAN', 'GRANDPARENT', 'SIBLING', 'OTHER'])
+        .optional(),
+    }),
+  }),
+  asyncHandler(async (req, res) => {
+    const auth = requireAuth(req);
+    const body = req.body as service.EnrolApplicationInput;
+
+    const result = await service.enrolApplication(auth, req.params['id']!, body);
+
+    await auditFromRequest(req, {
+      action: 'APPROVE',
+      module: 'student',
+      entityType: 'AdmissionApplication',
+      entityId: result.application.id,
+      after: { status: 'ENROLLED', studentId: result.student.id },
+    });
+
+    return created(res, result);
+  }),
+);
+
+/** Funnel counts for the admissions dashboard. */
+router.get(
+  '/admissions/funnel',
+  requirePermission('student:view'),
+  asyncHandler(async (req, res) => {
+    const { tenant } = scopedRequest(req);
+    return ok(res, await service.admissionFunnel(tenant.tenantId, tenant.branchId));
   }),
 );
 

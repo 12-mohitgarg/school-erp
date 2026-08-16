@@ -4,11 +4,13 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { asyncHandler, ok, created, paginated, pageParams } from '../../core/http/respond.js';
 import { validate, idParam, uuidSchema, emailSchema, phoneSchema, passwordSchema, latitude, longitude, listQuery, Validated } from '../../core/http/validate.js';
-import { requireAuth, requirePermission, requireSuperAdmin } from '../../core/auth/middleware.js';
+import { requireAuth, requirePermission } from '../../core/auth/middleware.js';
 import { scopedRequest } from '../../core/tenancy/scope.js';
 import { auditFromRequest } from '../../core/audit/audit.service.js';
 import { AppError } from '../../core/errors/AppError.js';
 import { prisma } from '../../core/db/prisma.js';
+import { storageConfig, assertStorableUrl } from '../../core/storage/cloudinary.js';
+import { JOBS, findJob, runJob } from '../../core/jobs/scheduler.js';
 import { hashPassword, encryptSecret, randomToken } from '../../core/auth/password.js';
 import { invalidateUserContext, invalidateManyContexts } from '../../core/auth/context.js';
 import { revokeAllUserTokens } from '../../core/auth/tokens.js';
@@ -43,12 +45,20 @@ router.patch('/institution', requirePermission('settings:update'),
     currency: z.string().length(3).optional(),
     locale: z.string().max(10).optional(),
     gstin: z.string().max(20).optional(),
+    // PRD 6.3 — each school sets its own location-retention window.
+    locationRetentionDays: z.coerce.number().int().min(1).max(365).optional(),
     settings: z.record(z.unknown()).optional(),
   }) }),
   asyncHandler(async (req, res) => {
     const auth = requireAuth(req);
+    const body = req.body as Record<string, unknown>;
+
+    // A logo is a stored file reference, so it goes through the same origin
+    // check as every other upload rather than being trusted as a plain URL.
+    if (typeof body['logoUrl'] === 'string') assertStorableUrl(body['logoUrl'], 'logoUrl');
+
     const tenant = await prisma.tenant.update({
-      where: { id: auth.tenantId }, data: req.body as never,
+      where: { id: auth.tenantId }, data: body as never,
     });
 
     await auditFromRequest(req, {
@@ -278,6 +288,18 @@ router.patch('/custom-roles/:id', requirePermission('settings:update'),
     const auth = requireAuth(req);
     const roleId = req.params['id']!;
 
+    /*
+      Scoped by tenant, not just by id. Updating on the primary key alone let a
+      token from one school rewrite another school's custom role — and since a
+      custom role carries an explicit permission list, that is a direct
+      privilege-escalation path into the other school.
+    */
+    const existing = await prisma.customRole.findFirst({
+      where: { id: roleId, tenantId: auth.tenantId },
+      select: { id: true },
+    });
+    if (!existing) throw AppError.notFound('Custom role');
+
     const role = await prisma.customRole.update({
       where: { id: roleId }, data: req.body as never,
       include: { users: { select: { id: true } } },
@@ -366,44 +388,108 @@ router.put('/integrations', requirePermission('settings:update'),
     return ok(res, integration);
   }));
 
-/** Cross-tenant provisioning, restricted to platform operators. */
-router.post('/tenants', requireSuperAdmin,
-  validate({ body: z.object({
-    name: z.string().trim().min(1).max(160),
-    code: z.string().trim().min(2).max(20),
-    adminEmail: emailSchema,
-    adminFirstName: z.string().min(1).max(60),
-    adminLastName: z.string().min(1).max(60),
-  }) }),
+// --- Cloud storage -----------------------------------------------------------
+
+/**
+ * Upload configuration for the browser.
+ *
+ * The cloud name and unsigned preset are public by design — they are what
+ * lets the browser post a file straight to Cloudinary without it transiting
+ * this API. Serving them from here rather than baking them into the bundle
+ * means storage can be re-pointed without a front-end rebuild.
+ */
+/*
+  No extra guard beyond the router's own `authenticate`. `requireAuth` is an
+  assertion helper that takes a Request and returns the auth context — passing
+  it here as middleware silently swallowed the request, because it never calls
+  `next()`. Any signed-in user may read this: the values are public by design.
+*/
+router.get('/storage', asyncHandler(async (_req, res) => ok(res, storageConfig())));
+
+// --- Scheduler ---------------------------------------------------------------
+
+/**
+ * The background jobs, what each one is for, and how the last runs went.
+ *
+ * Scheduled work that nobody can inspect is scheduled work nobody trusts, so
+ * every job declares the PRD clause it satisfies and carries its own run
+ * history rather than living only in the server log.
+ */
+router.get('/scheduler', requirePermission('settings:view'), asyncHandler(async (_req, res) => {
+  const [latest, recent] = await Promise.all([
+    // One row per job — the most recent run of each.
+    prisma.jobRun.findMany({
+      orderBy: { startedAt: 'desc' },
+      distinct: ['job'],
+      take: JOBS.length,
+    }),
+    prisma.jobRun.findMany({ orderBy: { startedAt: 'desc' }, take: 40 }),
+  ]);
+
+  const lastByJob = new Map(latest.map((run) => [run.job, run]));
+
+  // Failure counts over the last day, so a job that fails intermittently is
+  // visible even when its most recent run happened to succeed.
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const failures = await prisma.jobRun.groupBy({
+    by: ['job'],
+    where: { status: 'FAILED', startedAt: { gte: since } },
+    _count: { _all: true },
+  });
+  const failuresByJob = new Map(failures.map((f) => [f.job, f._count._all]));
+
+  return ok(res, {
+    jobs: JOBS.map((job) => {
+      const last = lastByJob.get(job.name);
+      return {
+        name: job.name,
+        label: job.label,
+        relatesTo: job.relatesTo,
+        description: job.description,
+        intervalMs: job.intervalMs,
+        manualRunnable: job.manualRunnable,
+        failures24h: failuresByJob.get(job.name) ?? 0,
+        lastRun: last
+          ? {
+              status: last.status,
+              startedAt: last.startedAt,
+              finishedAt: last.finishedAt,
+              durationMs: last.durationMs,
+              affected: last.affected,
+              summary: last.summary,
+              error: last.error,
+              manual: last.manual,
+            }
+          : null,
+        nextRunAt: last
+          ? new Date(last.startedAt.getTime() + job.intervalMs).toISOString()
+          : null,
+      };
+    }),
+    recentRuns: recent,
+  });
+}));
+
+/** Trigger a job by hand — for verifying a fix without waiting for the timer. */
+router.post('/scheduler/:name/run', requirePermission('settings:update'),
+  validate({ params: z.object({ name: z.string().min(1).max(60) }) }),
   asyncHandler(async (req, res) => {
-    const body = req.body as Record<string, string>;
-    const temporary = randomToken(9);
+    const auth = requireAuth(req);
+    const job = findJob(req.params['name']!);
 
-    const result = await prisma.$transaction(async (tx) => {
-      const tenant = await tx.tenant.create({
-        data: { name: body['name']!, code: body['code']!.toUpperCase() },
-      });
+    if (!job) throw AppError.notFound('Job');
+    if (!job.manualRunnable) {
+      throw AppError.badRequest(`"${job.label}" cannot be triggered manually`);
+    }
 
-      const branch = await tx.branch.create({
-        data: { tenantId: tenant.id, name: 'Main Campus', code: 'MAIN', isHeadOffice: true },
-      });
+    const outcome = await runJob(job, { manual: true, triggeredById: auth.userId });
 
-      const admin = await tx.user.create({
-        data: {
-          tenantId: tenant.id, branchId: branch.id,
-          email: body['adminEmail']!,
-          firstName: body['adminFirstName']!, lastName: body['adminLastName']!,
-          role: 'ADMIN', scope: 'TENANT',
-          passwordHash: await hashPassword(temporary),
-          mustChangePassword: true, status: 'ACTIVE',
-        },
-        select: { id: true, email: true },
-      });
-
-      return { tenant, branch, admin };
+    await auditFromRequest(req, {
+      action: 'UPDATE', module: 'settings', entityType: 'JobRun', entityId: job.name,
+      after: { status: outcome.status, affected: outcome.affected },
     });
 
-    return created(res, { ...result, temporaryPassword: temporary });
+    return ok(res, outcome);
   }));
 
 export default router;

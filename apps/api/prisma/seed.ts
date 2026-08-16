@@ -22,6 +22,41 @@ const prisma = new PrismaClient();
 const DEMO_TENANT_CODE = 'DPS-DEL';
 const PASSWORD = 'Password@123';
 
+/**
+ * The platform operator's own tenant.
+ *
+ * A platform admin is still an ordinary user inside *some* school — the flag
+ * only adds the right to create schools and open anyone's panel. Giving them
+ * their own tenant keeps that uniform: no user is stateless, and no query
+ * needs a special case for "the operator".
+ */
+const PLATFORM_TENANT_CODE = 'EDUSPHERE';
+const PLATFORM_ADMIN_EMAIL = 'platform@edusphere.io';
+
+/** Extra schools, so the Schools screen shows a real multi-school platform. */
+const EXTRA_SCHOOLS = [
+  {
+    code: 'RYAN-MUM',
+    name: 'Ryan International School',
+    city: 'Mumbai',
+    state: 'Maharashtra',
+    colour: '#0EA5E9',
+    latitude: 19.076,
+    longitude: 72.8777,
+    admin: { first: 'Nisha', last: 'Fernandes', email: 'principal@ryanmumbai.edu.in' },
+  },
+  {
+    code: 'GWH-BLR',
+    name: 'Greenwood High',
+    city: 'Bengaluru',
+    state: 'Karnataka',
+    colour: '#10B981',
+    latitude: 12.9716,
+    longitude: 77.5946,
+    admin: { first: 'Arun', last: 'Prasad', email: 'principal@greenwoodhigh.edu.in' },
+  },
+] as const;
+
 const dec = (n: number) => new Prisma.Decimal(n);
 const date = (iso: string) => new Date(`${iso}T00:00:00.000Z`);
 
@@ -83,6 +118,154 @@ async function connectWithRetry(attempts = 6): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, 3000 * attempt));
     }
   }
+}
+
+/**
+ * Provision a school the way the platform screen does: tenant, campus, the
+ * current academic year, the standard fee heads and leave types, a campus
+ * geofence and an administrator who can sign in immediately.
+ *
+ * Kept deliberately close to `platform.service.ts#createSchool` — seeding is
+ * this file's job, but a school that comes up half-configured is not a useful
+ * demonstration of what the operator actually gets.
+ */
+async function provisionSchool(
+  school: (typeof EXTRA_SCHOOLS)[number],
+  passwordHash: string,
+): Promise<void> {
+  const existing = await prisma.tenant.findUnique({
+    where: { code: school.code },
+    select: { id: true },
+  });
+  if (existing) await resetTenant(existing.id);
+
+  const now = new Date();
+  const startYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+
+  const tenant = await prisma.tenant.create({
+    data: {
+      name: school.name,
+      code: school.code,
+      city: school.city,
+      state: school.state,
+      primaryColor: school.colour,
+      email: school.admin.email,
+      locationRetentionDays: 30,
+    },
+    select: { id: true },
+  });
+
+  const branch = await prisma.branch.create({
+    data: {
+      tenantId: tenant.id,
+      name: 'Main Campus',
+      code: 'MAIN',
+      isHeadOffice: true,
+      city: school.city,
+      state: school.state,
+      latitude: school.latitude,
+      longitude: school.longitude,
+    },
+    select: { id: true },
+  });
+
+  await prisma.academicYear.create({
+    data: {
+      tenantId: tenant.id,
+      name: `${startYear}-${String(startYear + 1).slice(2)}`,
+      startDate: new Date(Date.UTC(startYear, 3, 1)),
+      endDate: new Date(Date.UTC(startYear + 1, 2, 31)),
+      isCurrent: true,
+    },
+  });
+
+  await prisma.feeHead.createMany({
+    data: [
+      { tenantId: tenant.id, name: 'Tuition Fee', code: 'TUITION', category: 'TUITION', frequency: 'MONTHLY' },
+      { tenantId: tenant.id, name: 'Admission Fee', code: 'ADMISSION', category: 'ADMISSION', frequency: 'ONE_TIME' },
+      { tenantId: tenant.id, name: 'Transport Fee', code: 'TRANSPORT', category: 'TRANSPORT', frequency: 'MONTHLY' },
+    ],
+    skipDuplicates: true,
+  });
+
+  await prisma.leaveType.createMany({
+    data: [
+      { tenantId: tenant.id, name: 'Casual Leave', code: 'CL', annualQuota: 12, isPaid: true },
+      { tenantId: tenant.id, name: 'Sick Leave', code: 'SL', annualQuota: 10, isPaid: true },
+    ],
+    skipDuplicates: true,
+  });
+
+  await prisma.geofence.create({
+    data: {
+      tenantId: tenant.id,
+      branchId: branch.id,
+      name: `${school.name} campus`,
+      type: 'SCHOOL',
+      shape: 'CIRCLE',
+      centerLatitude: school.latitude,
+      centerLongitude: school.longitude,
+      radiusMeters: 200,
+    },
+  });
+
+  await prisma.user.create({
+    data: {
+      tenantId: tenant.id,
+      branchId: branch.id,
+      email: school.admin.email,
+      firstName: school.admin.first,
+      lastName: school.admin.last,
+      role: 'SUPER_ADMIN',
+      scope: 'TENANT',
+      passwordHash,
+      status: 'ACTIVE',
+      // This school's own Super Admin: unrestricted inside it, invisible to
+      // every other school. The platform flag below is what separates them.
+      isPlatformAdmin: false,
+    },
+  });
+}
+
+/** Create the operator's tenant and the one account that can add schools. */
+async function provisionPlatform(passwordHash: string): Promise<void> {
+  const tenant = await prisma.tenant.upsert({
+    where: { code: PLATFORM_TENANT_CODE },
+    create: {
+      name: 'EduSphere Platform',
+      code: PLATFORM_TENANT_CODE,
+      legalName: 'EduSphere Solutions',
+      primaryColor: '#4F46E5',
+      city: 'New Delhi',
+      state: 'Delhi',
+    },
+    update: {},
+    select: { id: true },
+  });
+
+  const branch = await prisma.branch.upsert({
+    where: { tenantId_code: { tenantId: tenant.id, code: 'HQ' } },
+    create: { tenantId: tenant.id, name: 'Head Office', code: 'HQ', isHeadOffice: true },
+    update: {},
+    select: { id: true },
+  });
+
+  await prisma.user.upsert({
+    where: { tenantId_email: { tenantId: tenant.id, email: PLATFORM_ADMIN_EMAIL } },
+    create: {
+      tenantId: tenant.id,
+      branchId: branch.id,
+      email: PLATFORM_ADMIN_EMAIL,
+      firstName: 'Platform',
+      lastName: 'Operator',
+      role: 'SUPER_ADMIN',
+      scope: 'TENANT',
+      passwordHash,
+      status: 'ACTIVE',
+      isPlatformAdmin: true,
+    },
+    update: { passwordHash, isPlatformAdmin: true, status: 'ACTIVE' },
+  });
 }
 
 async function main() {
@@ -969,9 +1152,21 @@ async function main() {
   step('content', 'assignments · announcements · leave types · attendance rules');
 
   // -------------------------------------------------------------------------
+  // Platform layer — the operator, plus two more schools to switch between
+  // -------------------------------------------------------------------------
+  await provisionPlatform(passwordHash);
+
+  for (const school of EXTRA_SCHOOLS) {
+    await provisionSchool(school, passwordHash);
+  }
+
+  step('platform', `1 operator · ${EXTRA_SCHOOLS.length + 1} schools`);
+
+  // -------------------------------------------------------------------------
   console.log(`\nDone in ${((Date.now() - started) / 1000).toFixed(1)}s.`);
   console.log(`\nSign in at http://localhost:5173 — password for every account: ${PASSWORD}\n`);
   console.table([
+    { Panel: 'Platform Operator', Email: PLATFORM_ADMIN_EMAIL },
     { Panel: 'Super Admin', Email: 'superadmin@dpsdelhi.edu.in' },
     { Panel: 'School Admin', Email: 'principal@dpsdelhi.edu.in' },
     { Panel: 'Administration', Email: 'admin@dpsdelhi.edu.in' },
@@ -982,7 +1177,15 @@ async function main() {
     { Panel: 'Student', Email: 'student@dpsdelhi.edu.in' },
     { Panel: 'Parent', Email: 'parent.1a@example.com' },
     { Panel: 'Driver', Email: 'driver@dpsdelhi.edu.in' },
+    ...EXTRA_SCHOOLS.map((school) => ({
+      Panel: `${school.name} Admin`,
+      Email: school.admin.email,
+    })),
   ]);
+
+  console.log(
+    `\nSign in as ${PLATFORM_ADMIN_EMAIL} to add schools and open any school's panel.\n`,
+  );
 }
 
 main()

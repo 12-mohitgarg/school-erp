@@ -1,8 +1,8 @@
 /**
  * Process entry point: boot dependencies, start listening, shut down cleanly.
  *
- * Startup is fail-fast — if the database or Redis is unreachable we exit
- * rather than serving a half-working API that returns 500s.
+ * Startup is fail-fast — if the database is unreachable we exit rather than
+ * serving a half-working API that returns 500s.
  */
 
 import { createServer } from 'node:http';
@@ -10,7 +10,7 @@ import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { logger } from './core/logger.js';
 import { connectDatabase, disconnectDatabase } from './core/db/prisma.js';
-import { connectRedis, disconnectRedis } from './core/cache/redis.js';
+import { disposeStore } from './core/cache/store.js';
 import { closeSocketServer, initSocketServer } from './core/realtime/socket.js';
 import { connectMqtt, disconnectMqtt } from './core/realtime/mqtt.js';
 import { startScheduledJobs, stopScheduledJobs } from './core/jobs/scheduler.js';
@@ -22,7 +22,6 @@ async function bootstrap(): Promise<void> {
   );
 
   await connectDatabase();
-  await connectRedis();
 
   const app = createApp();
   const httpServer = createServer(app);
@@ -71,7 +70,7 @@ function registerShutdownHandlers(httpServer: ReturnType<typeof createServer>): 
       await closeSocketServer();
       await new Promise<void>((resolve) => httpServer.close(() => resolve()));
       await disconnectMqtt();
-      await disconnectRedis();
+      disposeStore();
       await disconnectDatabase();
 
       clearTimeout(forceExit);

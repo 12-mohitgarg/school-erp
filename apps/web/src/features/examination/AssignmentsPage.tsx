@@ -7,7 +7,7 @@ import { ResourceList } from '@/components/layout/ResourceList';
 import { useListState } from '@/lib/useListState';
 import { useAuth } from '@/features/auth/useAuth';
 import { Badge, Button, StatusBadge, type Column } from '@/components/ui';
-import { formatDate, relativeTime } from '@/lib/utils';
+import { formatDate } from '@/lib/utils';
 
 type Row = Record<string, unknown>;
 

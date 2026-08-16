@@ -25,9 +25,7 @@
     "db:migrate": "npm run db:migrate --workspace=@erp/api",
     "db:seed": "npm run db:seed --workspace=@erp/api",
     "db:studio": "npm run db:studio --workspace=@erp/api",
-    "docker:up": "docker compose -f infra/docker/docker-compose.yml up -d",
-    "docker:down": "docker compose -f infra/docker/docker-compose.yml down",
-    "docker:logs": "docker compose -f infra/docker/docker-compose.yml logs -f"
+    "db:apply-spatial": "node apps/api/prisma/sql/apply.mjs"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^8.18.0",

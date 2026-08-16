@@ -28,6 +28,8 @@ import {
   Wallet,
   FileText,
   CalendarRange,
+  Building2,
+  Timer,
   type LucideIcon,
 } from 'lucide-react';
 import { hasAnyPermission, type Permission } from '@erp/shared';
@@ -41,6 +43,12 @@ export interface NavItem {
   /** Rendered as a live count badge, resolved by the shell. */
   badgeKey?: 'notifications' | 'sos' | 'pendingLeave';
   end?: boolean;
+  /**
+   * Visible only to a platform operator. Distinct from `permissions`: the
+   * control plane above the schools is not a module permission, and a school's
+   * own Super Admin holds every permission yet must never see it.
+   */
+  platformOnly?: boolean;
 }
 
 export interface NavSection {
@@ -49,6 +57,18 @@ export interface NavSection {
 }
 
 const NAV: NavSection[] = [
+  {
+    label: 'Platform',
+    items: [
+      {
+        label: 'Schools',
+        to: '/platform/schools',
+        icon: Building2,
+        permissions: [],
+        platformOnly: true,
+      },
+    ],
+  },
   {
     label: 'Overview',
     items: [
@@ -120,6 +140,7 @@ const NAV: NavSection[] = [
     label: 'Administration',
     items: [
       { label: 'Users & Roles', to: '/settings/users', icon: ShieldCheck, permissions: ['settings:view'] },
+      { label: 'Scheduler', to: '/settings/scheduler', icon: Timer, permissions: ['settings:view'] },
       { label: 'Settings', to: '/settings', icon: Settings, permissions: ['settings:view'], end: true },
     ],
   },
@@ -129,18 +150,29 @@ const NAV: NavSection[] = [
  * Sections the user can actually use, with empty sections dropped so the
  * sidebar never shows a bare heading.
  */
-export function navigationFor(permissions: readonly string[]): NavSection[] {
+export interface NavContext {
+  isPlatformAdmin?: boolean;
+}
+
+export function navigationFor(
+  permissions: readonly string[],
+  context: NavContext = {},
+): NavSection[] {
   return NAV.map((section) => ({
     ...section,
-    items: section.items.filter(
-      (item) => item.permissions.length === 0 || hasAnyPermission(permissions, item.permissions),
-    ),
+    items: section.items.filter((item) => {
+      if (item.platformOnly && !context.isPlatformAdmin) return false;
+      return item.permissions.length === 0 || hasAnyPermission(permissions, item.permissions);
+    }),
   })).filter((section) => section.items.length > 0);
 }
 
 /** Flat list, for the command palette and breadcrumb lookups. */
-export function allNavItems(permissions: readonly string[]): NavItem[] {
-  return navigationFor(permissions).flatMap((s) => s.items);
+export function allNavItems(
+  permissions: readonly string[],
+  context: NavContext = {},
+): NavItem[] {
+  return navigationFor(permissions, context).flatMap((s) => s.items);
 }
 
 /**
@@ -151,13 +183,17 @@ export function allNavItems(permissions: readonly string[]): NavItem[] {
  * previous session landed on a permission-denied screen — technically correct,
  * but a terrible first impression.
  */
-export function landingRoute(permissions: readonly string[], intended?: string | null): string {
+export function landingRoute(
+  permissions: readonly string[],
+  intended?: string | null,
+  context: NavContext = {},
+): string {
   if (!intended || intended === '/login') return '/';
 
   const path = intended.split('?')[0] ?? '/';
   if (path === '/') return '/';
 
-  const allowed = allNavItems(permissions).some(
+  const allowed = allNavItems(permissions, context).some(
     (item) => item.to !== '/' && path.startsWith(item.to),
   );
 

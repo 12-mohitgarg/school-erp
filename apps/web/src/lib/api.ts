@@ -99,7 +99,7 @@ export const TAGS = [
   'Employee', 'Leave', 'Payroll', 'Book', 'Loan', 'Vehicle', 'Route', 'Trip',
   'Tracking', 'Geofence', 'Sos', 'Alert', 'Inventory', 'Asset', 'Vendor',
   'Announcement', 'Notification', 'Conversation', 'Report', 'User', 'Role',
-  'Integration', 'Settings', 'Audit',
+  'Integration', 'Settings', 'Audit', 'School', 'Scheduler', 'Admission',
 ] as const;
 
 export type ApiTag = (typeof TAGS)[number];

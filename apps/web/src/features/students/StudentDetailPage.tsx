@@ -1,10 +1,12 @@
 import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, Mail, Phone, MapPin, Users } from 'lucide-react';
+import { ArrowLeft, Phone, MapPin, Users } from 'lucide-react';
 import { useStudentQuery, useStudentFeeSummaryQuery, useStudentAttendanceQuery } from '@/features/api/endpoints';
-import { Avatar, Badge, Card, CardBody, CardHeader, EmptyState, ErrorState, PageHeader, Skeleton, StatusBadge } from '@/components/ui';
+import { Avatar, Badge, Card, CardBody, CardHeader, EmptyState, ErrorState, PageHeader, StatusBadge } from '@/components/ui';
 import { StatCard, StatGrid } from '@/components/ui/StatCard';
 import { errorMessage } from '@/lib/api';
 import { formatCompactCurrency, formatDate } from '@/lib/utils';
+import { DetailSkeleton } from '@/components/ui/Skeletons';
+import { StudentDocumentsCard } from './StudentDocumentsCard';
 
 export default function StudentDetailPage() {
   const { id = '' } = useParams();
@@ -14,14 +16,9 @@ export default function StudentDetailPage() {
 
   if (error) return <ErrorState message={errorMessage(error)} />;
 
-  if (isLoading || !data) {
-    return (
-      <>
-        <Skeleton className="h-8 w-52" />
-        <Skeleton className="mt-4 h-40" />
-      </>
-    );
-  }
+  // Mirrors the real layout below — profile header, then a wide panel
+  // beside a stacked sidebar — so nothing shifts when the data lands.
+  if (isLoading || !data) return <DetailSkeleton />;
 
   const student = data as Record<string, unknown>;
   const fullName = String(student['fullName'] ?? '');
@@ -121,6 +118,8 @@ export default function StudentDetailPage() {
             </ul>
           )}
         </Card>
+
+        <StudentDocumentsCard studentId={id} studentName={fullName} />
 
         <Card className="lg:col-span-2">
           <CardHeader title="Invoices" description={fees ? `${fees.summary.overdueCount} overdue` : undefined} />

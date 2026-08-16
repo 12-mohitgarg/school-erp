@@ -11,15 +11,19 @@ import {
   useGeofencesQuery, useRoutesQuery, useAcknowledgeSosMutation, useResolveSosMutation,
   type LiveVehicle,
 } from '@/features/api/endpoints';
-import { useVehicleSubscription } from '@/lib/useRealtime';
+import { useFleetStream } from '@/lib/useRealtime';
 import { errorMessage } from '@/lib/api';
 import {
   Alert, Badge, Button, Card, CardHeader, EmptyState, PageHeader, Tabs, StatusBadge,
 } from '@/components/ui';
 import { StatCard, StatGrid } from '@/components/ui/StatCard';
 import { cn, formatDateTime, relativeTime } from '@/lib/utils';
+import { ListSkeleton, CardSkeleton } from '@/components/ui/Skeletons';
 
 const CAMPUS: [number, number] = [28.6129, 77.2295];
+
+/** Matches GPS_PING_INTERVAL_SECONDS on the API; PRD §6.1 says 10-15s. */
+const GPS_PING_SECONDS = 12;
 
 /**
  * Bus marker drawn as an inline SVG divIcon and rotated to the vehicle's
@@ -112,37 +116,47 @@ export default function TrackingPage() {
 // ---------------------------------------------------------------------------
 
 function LiveMap() {
-  // Poll as a safety net; the socket subscription below is the primary feed.
-  const { data: fleet, isLoading } = useFleetLiveQuery(undefined, { pollingInterval: 20_000 });
+  /*
+    Two feeds, deliberately.
+
+    The REST snapshot carries everything the socket does not — registration,
+    route, driver, occupancy — and its slow poll is the safety net for a
+    dropped socket or a bus that was already parked when the page opened.
+
+    The socket stream carries positions for the whole fleet, so every marker
+    moves rather than only the one an operator happens to have selected.
+    Merging them here means one `vehicles` array feeds both the map and the
+    list, and neither knows which feed a given field came from.
+  */
+  const { data: fleet, isLoading } = useFleetLiveQuery(undefined, { pollingInterval: 30_000 });
   const { data: geofences } = useGeofencesQuery();
   const { data: routes } = useRoutesQuery();
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [livePositions, setLivePositions] = useState<Record<string, { latitude: number; longitude: number; speed: number; heading: number; timestamp: string }>>({});
+  const livePositions = useFleetStream();
 
-  // Merge the polled snapshot with any newer socket pings.
   const vehicles: LiveVehicle[] = useMemo(
     () =>
       (fleet ?? []).map((vehicle) => {
         const live = livePositions[vehicle.vehicleId];
-        return live
-          ? {
-              ...vehicle,
-              ...live,
-              isMoving: live.speed > 3,
-              staleSeconds: Math.floor((Date.now() - new Date(live.timestamp).getTime()) / 1000),
-            }
-          : vehicle;
+        if (!live) return vehicle;
+
+        return {
+          ...vehicle,
+          latitude: live.latitude,
+          longitude: live.longitude,
+          speed: live.speed,
+          heading: live.heading,
+          timestamp: live.timestamp,
+          isMoving: live.speed > 3,
+          staleSeconds: Math.floor((Date.now() - new Date(live.timestamp).getTime()) / 1000),
+        };
       }),
     [fleet, livePositions],
   );
 
   const selected = vehicles.find((v) => v.vehicleId === selectedId) ?? null;
-
-  useVehicleSubscription(selectedId, (payload) => {
-    if (!selectedId) return;
-    setLivePositions((prev) => ({ ...prev, [selectedId]: payload }));
-  });
+  const streaming = Object.keys(livePositions).length > 0;
 
   const selectedRoute = routes?.find((r) => r.id === selected?.routeId);
 
@@ -265,7 +279,7 @@ function LiveMap() {
           <CardHeader title="Fleet" description={`${vehicles.length} vehicle${vehicles.length === 1 ? '' : 's'}`} />
           <div className="min-h-0 flex-1 overflow-y-auto">
             {isLoading ? (
-              <EmptyState title="Loading fleet…" />
+              <ListSkeleton rows={5} />
             ) : vehicles.length === 0 ? (
               <EmptyState
                 icon={<Bus className="h-5 w-5" aria-hidden="true" />}
@@ -349,11 +363,7 @@ function LiveMap() {
         </Card>
       </div>
 
-      <p className="flex items-center gap-1.5 text-xs text-ink-subtle">
-        <Radio className="h-3 w-3" aria-hidden="true" />
-        Positions stream over WebSocket. Selecting a vehicle subscribes to its live feed; the fleet
-        list refreshes every 20 seconds as a fallback.
-      </p>
+      <HowLiveTrackingWorks streaming={streaming} vehicleCount={vehicles.length} />
     </div>
   );
 }
@@ -387,7 +397,15 @@ function SosPanel() {
     }
   }
 
-  if (isLoading) return <Card><EmptyState title="Loading alerts…" /></Card>;
+  if (isLoading) {
+    return (
+      <div className="space-y-3">
+        <CardSkeleton lines={2} title={false} />
+        <CardSkeleton lines={2} title={false} />
+        <CardSkeleton lines={2} title={false} />
+      </div>
+    );
+  }
 
   if (!data || data.items.length === 0) {
     return (
@@ -490,7 +508,13 @@ function SosPanel() {
 function AlertsPanel() {
   const { data, isLoading } = useSafetyAlertsQuery({ limit: 40 });
 
-  if (isLoading) return <Card><EmptyState title="Loading…" /></Card>;
+  if (isLoading) {
+    return (
+      <Card>
+        <ListSkeleton rows={6} avatar={false} />
+      </Card>
+    );
+  }
 
   return (
     <Card>
@@ -524,6 +548,105 @@ function AlertsPanel() {
             );
           })}
         </ul>
+      )}
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+/**
+ * "How does live tracking actually work?"
+ *
+ * A collapsed explainer rather than a paragraph in a handover document,
+ * because the people who ask this are the people looking at the map — an admin
+ * wondering why a bus has not moved, or a principal being shown the product.
+ * It also states the live connection state, so "is this real-time or is it
+ * broken?" is answerable from the screen itself.
+ */
+function HowLiveTrackingWorks({
+  streaming,
+  vehicleCount,
+}: {
+  streaming: boolean;
+  vehicleCount: number;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const steps = [
+    {
+      title: 'The bus reports',
+      body: `The driver app, or a hardware tracker over MQTT, sends its position every ${GPS_PING_SECONDS} seconds while a trip is in progress.`,
+    },
+    {
+      title: 'The server ingests it',
+      body: 'One pipeline handles both sources: the ping is stored, the last-known position cached, and everything after that is best-effort so an alerting failure can never lose the position itself.',
+    },
+    {
+      title: 'Rules run on every ping',
+      body: 'Geofence entry and exit, over-speed, and drift off the planned route. Geofences are edge-triggered — an event fires only when the bus crosses the boundary, otherwise a parked bus would alert every few seconds.',
+    },
+    {
+      title: 'ETAs are recomputed',
+      body: 'Distance is measured stop to stop along the stops still ahead, plus the halt at each one, rather than a straight line — so an arrival estimate accounts for the route in between.',
+    },
+    {
+      title: 'It reaches this screen',
+      body: 'Positions are pushed over a WebSocket. Staff join a school-wide fleet feed; a parent joins only the one bus carrying their child. The table below still refreshes every 30 seconds as a fallback if the socket drops.',
+    },
+    {
+      title: 'Every view is logged',
+      body: 'Each time a location is opened it is written to the access log, and history is purged automatically once the school\u2019s retention window passes (PRD \u00a76.3).',
+    },
+  ];
+
+  return (
+    <Card>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2.5 px-5 py-3 text-left"
+      >
+        <span
+          className={cn(
+            'relative flex h-2 w-2 shrink-0 rounded-full',
+            streaming ? 'bg-success' : 'bg-warning',
+          )}
+          aria-hidden="true"
+        >
+          {streaming && (
+            <span className="absolute inline-flex h-full w-full animate-pulse-ring rounded-full bg-success opacity-75" />
+          )}
+        </span>
+
+        <Radio className="h-3.5 w-3.5 shrink-0 text-ink-subtle" aria-hidden="true" />
+
+        <span className="min-w-0 flex-1 text-xs text-ink-muted">
+          {streaming
+            ? `Streaming live over WebSocket — ${vehicleCount} vehicle${vehicleCount === 1 ? '' : 's'} on the map.`
+            : 'Waiting for the first live position. Showing the last known location of each vehicle.'}
+        </span>
+
+        <span className="shrink-0 text-xs font-medium text-brand-600">
+          {open ? 'Hide' : 'How this works'}
+        </span>
+      </button>
+
+      {open && (
+        <ol className="grid gap-3 border-t border-hairline p-5 sm:grid-cols-2 lg:grid-cols-3">
+          {steps.map((step, index) => (
+            <li key={step.title} className="flex gap-3">
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-500/10 text-2xs font-semibold text-brand-600 nums">
+                {index + 1}
+              </span>
+              <div className="min-w-0">
+                <p className="text-xs font-semibold text-ink">{step.title}</p>
+                <p className="mt-0.5 text-xs text-ink-muted">{step.body}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
       )}
     </Card>
   );

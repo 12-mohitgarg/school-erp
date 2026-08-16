@@ -13,6 +13,9 @@ import { Avatar, Badge, Button } from '@/components/ui';
 import { SignOutDialog } from '@/components/ui/ConfirmDialog';
 import { useAuth } from '@/features/auth/useAuth';
 import { useUnreadCountQuery } from '@/features/communication/communicationApi';
+import { useStorageConfigQuery } from '@/features/api/endpoints';
+import { setStorageConfig } from '@/lib/cloudinary';
+import { SchoolSwitcher, ImpersonationBanner } from '@/features/platform/SchoolSwitcher';
 
 export function AppShell() {
   const dispatch = useAppDispatch();
@@ -22,8 +25,18 @@ export function AppShell() {
   // Signing out discards in-flight work, so it asks first.
   const [signOutOpen, setSignOutOpen] = useState(false);
 
-  const sections = navigationFor(user?.permissions ?? []);
+  const sections = navigationFor(user?.permissions ?? [], {
+    isPlatformAdmin: Boolean(user?.isPlatformAdmin),
+  });
   const { data: unread } = useUnreadCountQuery(undefined, { pollingInterval: 180_000 });
+
+  /*
+    Upload settings come from the API rather than the bundle, so storage can be
+    re-pointed without a front-end rebuild. Fetched once here and handed to the
+    upload helper, which every file control reads from.
+  */
+  const { data: storage } = useStorageConfigQuery();
+  useEffect(() => setStorageConfig(storage), [storage]);
 
   // Close the mobile drawer on navigation, or it covers the page you just opened.
   useEffect(() => {
@@ -191,6 +204,9 @@ export function AppShell() {
           </div>
 
           <div className="ml-auto flex shrink-0 items-center gap-0.5 sm:gap-1">
+            {/* Which school am I in? Only a platform operator can change it. */}
+            <SchoolSwitcher />
+
             {user.branchName && (
               <Badge tone="neutral" className="hidden lg:inline-flex">
                 {user.branchName}
@@ -211,6 +227,8 @@ export function AppShell() {
             </NavLink>
           </div>
         </header>
+
+        <ImpersonationBanner />
 
         {/* SOS banner — the one thing that should interrupt any screen. */}
         {activeSos && (

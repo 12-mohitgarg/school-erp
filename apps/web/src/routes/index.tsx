@@ -4,7 +4,8 @@ import type { Permission } from '@erp/shared';
 import { AppShell } from '@/components/layout/AppShell';
 import { AuthBootScreen, LoginPage } from '@/features/auth/LoginPage';
 import { useAuth } from '@/features/auth/useAuth';
-import { EmptyState, Spinner } from '@/components/ui';
+import { EmptyState } from '@/components/ui';
+import { PageSkeleton, DetailSkeleton } from '@/components/ui/Skeletons';
 
 // Route-level code splitting keeps the initial bundle small; a librarian never
 // downloads the payroll screens.
@@ -33,13 +34,18 @@ const MessagesPage = lazy(() => import('@/features/communication/MessagesPage'))
 const ReportsPage = lazy(() => import('@/features/reports/ReportsPage'));
 const UsersPage = lazy(() => import('@/features/settings/UsersPage'));
 const SettingsPage = lazy(() => import('@/features/settings/SettingsPage'));
+const SchedulerPage = lazy(() => import('@/features/settings/SchedulerPage'));
+const SchoolsPage = lazy(() => import('@/features/platform/SchoolsPage'));
 
+/**
+ * Chunk-loading fallback.
+ *
+ * A skeleton in the shape of the page, not a spinner: on a slow connection the
+ * lazy chunk fetch is the longest wait in the app, and a spinner there makes
+ * the whole product feel sluggish even when the data behind it is fast.
+ */
 function PageFallback() {
-  return (
-    <div className="flex h-64 items-center justify-center">
-      <Spinner className="h-5 w-5 text-brand-600" />
-    </div>
-  );
+  return <PageSkeleton />;
 }
 
 /** Redirects to sign-in, remembering where the user was headed. */
@@ -50,6 +56,27 @@ function RequireAuth({ children }: { children: ReactNode }) {
   if (initialising) return <AuthBootScreen />;
   if (!isAuthenticated) {
     return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
+  }
+  return <>{children}</>;
+}
+
+/**
+ * Platform-operator gate.
+ *
+ * Checked on a flag rather than a permission: a school's own Super Admin holds
+ * every permission in the matrix and must still never reach the control plane
+ * above the schools. The API enforces the same rule on every platform route.
+ */
+function RequirePlatformAdmin({ children }: { children: ReactNode }) {
+  const { user } = useAuth();
+
+  if (!user?.isPlatformAdmin) {
+    return (
+      <EmptyState
+        title="Platform administrators only"
+        description="Managing schools is restricted to the platform operator. Your account administers a single school."
+      />
+    );
   }
   return <>{children}</>;
 }
@@ -73,9 +100,22 @@ function RequirePermission({ permission, children }: { permission: Permission; c
 }
 
 /** Wrap a lazy page in its suspense boundary and permission gate. */
-function page(element: ReactNode, permission?: Permission) {
-  const content = <Suspense fallback={<PageFallback />}>{element}</Suspense>;
-  return permission ? <RequirePermission permission={permission}>{content}</RequirePermission> : content;
+function page(
+  element: ReactNode,
+  permission?: Permission,
+  options: { fallback?: ReactNode; platformOnly?: boolean } = {},
+) {
+  let content: ReactNode = (
+    <Suspense fallback={options.fallback ?? <PageFallback />}>{element}</Suspense>
+  );
+
+  if (permission) {
+    content = <RequirePermission permission={permission}>{content}</RequirePermission>;
+  }
+  if (options.platformOnly) {
+    content = <RequirePlatformAdmin>{content}</RequirePlatformAdmin>;
+  }
+  return content;
 }
 
 export function AppRoutes() {
@@ -92,10 +132,21 @@ export function AppRoutes() {
       >
         <Route index element={page(<DashboardPage />)} />
 
+        {/* The control plane above the schools. */}
+        <Route
+          path="platform/schools"
+          element={page(<SchoolsPage />, undefined, { platformOnly: true })}
+        />
+
         <Route path="students">
           <Route index element={page(<StudentsPage />, 'student:view')} />
           <Route path="admissions" element={page(<AdmissionsPage />, 'student:view')} />
-          <Route path=":id" element={page(<StudentDetailPage />, 'student:view')} />
+          <Route
+            path=":id"
+            element={page(<StudentDetailPage />, 'student:view', {
+              fallback: <DetailSkeleton />,
+            })}
+          />
         </Route>
 
         <Route path="academic">
@@ -138,6 +189,7 @@ export function AppRoutes() {
         <Route path="settings">
           <Route index element={page(<SettingsPage />, 'settings:view')} />
           <Route path="users" element={page(<UsersPage />, 'settings:view')} />
+          <Route path="scheduler" element={page(<SchedulerPage />, 'settings:view')} />
         </Route>
 
         <Route

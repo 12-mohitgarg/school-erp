@@ -80,6 +80,13 @@ export interface AuthUser {
   locale: string;
   mustChangePassword: boolean;
   twoFactorEnabled: boolean;
+  /**
+   * Platform operator: may create schools and open any school's panel.
+   * Drives the school switcher and the Schools nav section.
+   */
+  isPlatformAdmin: boolean;
+  /** Set while a platform admin is working inside a school other than their own. */
+  impersonatingTenant?: boolean;
   /** Populated for STUDENT logins. */
   studentId?: string;
   /** Populated for TEACHER / HR / ACCOUNTANT / LIBRARIAN / DRIVER logins. */
@@ -117,13 +124,53 @@ export interface LoginResponse {
 export interface JwtPayload {
   sub: string;
   role: Role;
+  /**
+   * The school this token acts in.
+   *
+   * Normally identical to the user's home tenant. A platform admin who has
+   * opened another school's panel carries that school's id here instead, which
+   * is what makes every existing tenant-scoped query resolve to the right
+   * school without any handler knowing about impersonation.
+   */
   tenantId: string;
   branchId: string | null;
   scope: DataScope;
   /** Refresh-token family id, used to detect token reuse. */
   sid: string;
+  /** Present only when `tenantId` differs from the user's home tenant. */
+  pa?: true;
   iat: number;
   exp: number;
+}
+
+// ---------------------------------------------------------------------------
+// Platform (multi-school)
+// ---------------------------------------------------------------------------
+
+/** One school as the platform operator sees it. */
+export interface SchoolSummary {
+  id: string;
+  name: string;
+  code: string;
+  city: string | null;
+  state: string | null;
+  logoUrl: string | null;
+  primaryColor: string;
+  isActive: boolean;
+  suspendedAt: string | null;
+  suspendedReason: string | null;
+  subscriptionTier: string;
+  subscriptionEndsAt: string | null;
+  locationRetentionDays: number;
+  createdAt: string;
+  counts: {
+    branches: number;
+    students: number;
+    staff: number;
+    users: number;
+    vehicles: number;
+  };
+  admins: Array<{ id: string; fullName: string; email: string | null; lastLoginAt: string | null }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +282,14 @@ export const WS_EVENTS = {
   // Client -> server
   SUBSCRIBE_VEHICLE: 'subscribe:vehicle',
   SUBSCRIBE_STUDENT: 'subscribe:student',
+  /**
+   * Watch every vehicle in the school at once — the admin safety dashboard.
+   *
+   * Separate from SUBSCRIBE_VEHICLE because the authorisation is different:
+   * fleet-wide positions go only to staff with tracking access, never to a
+   * guardian, who may see the one bus their child is on and nothing else.
+   */
+  SUBSCRIBE_FLEET: 'subscribe:fleet',
   UNSUBSCRIBE: 'unsubscribe',
   DRIVER_LOCATION: 'driver:location',
   DRIVER_LOCATION_BATCH: 'driver:location:batch',

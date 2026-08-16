@@ -8,6 +8,7 @@ import { errorMessage } from '@/lib/api';
 import { Button, Card, CardHeader, EmptyState, PageHeader, Tabs } from '@/components/ui';
 import { ChatPanel } from './ChatPanel';
 import { cn, relativeTime } from '@/lib/utils';
+import { ListSkeleton } from '@/components/ui/Skeletons';
 
 export default function MessagesPage() {
   const [tab, setTab] = useState<'chat' | 'inbox'>('chat');
@@ -48,7 +49,13 @@ function Inbox() {
     }
   }
 
-  if (isLoading) return <Card><EmptyState title="Loading…" /></Card>;
+  if (isLoading) {
+    return (
+      <Card>
+        <ListSkeleton rows={6} />
+      </Card>
+    );
+  }
 
   if (!data || data.items.length === 0) {
     return (

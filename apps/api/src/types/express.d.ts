@@ -11,12 +11,17 @@ export interface RequestAuth {
   /** Resolved permissions: role defaults + grants - denials. `['*']` for super admin. */
   permissions: string[];
   scope: DataScope;
+  /** The school this request acts in — the opened school for a platform admin. */
   tenantId: string;
   branchId: string | null;
   /** Refresh-token family id, for session revocation. */
   sessionId: string;
   email: string | null;
   fullName: string;
+  /** May create schools and open any school's panel. */
+  isPlatformAdmin: boolean;
+  /** The user's own school. Differs from `tenantId` only while impersonating. */
+  homeTenantId: string;
   /** Domain identity, populated per role. */
   studentId?: string;
   employeeId?: string;

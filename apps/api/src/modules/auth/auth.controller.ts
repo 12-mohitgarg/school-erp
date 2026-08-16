@@ -58,7 +58,7 @@ export const refresh = asyncHandler(async (req, res) => {
   // The user is returned alongside the tokens so a page reload restores the
   // session in ONE round trip. Fetching the profile separately doubled the
   // time-to-first-paint, which against a hosted database is very visible.
-  const user = await authService.getCurrentUser(subject.userId);
+  const user = await authService.getCurrentUser(subject.userId, subject.tenantId);
 
   return ok(res, { tokens: { ...tokens, tokenType: 'Bearer' as const }, user });
 });
@@ -80,7 +80,7 @@ export const logout = asyncHandler(async (req, res) => {
 
 export const me = asyncHandler(async (req, res) => {
   const auth = requireAuth(req);
-  return ok(res, await authService.getCurrentUser(auth.userId));
+  return ok(res, await authService.getCurrentUser(auth.userId, auth.tenantId));
 });
 
 export const changePassword = asyncHandler(async (req, res) => {

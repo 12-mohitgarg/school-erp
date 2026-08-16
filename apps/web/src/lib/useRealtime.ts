@@ -7,7 +7,7 @@
  * store state rather than to the socket, so nothing needs to know it exists.
  */
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import { toast } from 'sonner';
 import { WS_EVENTS } from '@erp/shared';
@@ -180,10 +180,26 @@ export function useConversationStream(
   }, [conversationId, accessToken]);
 }
 
-/** Subscribe to a vehicle's live position for the duration of a component. */
+export interface LivePosition {
+  vehicleId?: string;
+  latitude: number;
+  longitude: number;
+  speed: number;
+  heading: number;
+  timestamp: string;
+}
+
+/**
+ * Subscribe to one vehicle's live position.
+ *
+ * Uses the session's existing socket rather than opening its own. The previous
+ * version created a second connection every time the selected bus changed,
+ * which meant an admin clicking through a fleet of twenty left twenty
+ * handshakes and twenty authenticated sockets behind them.
+ */
 export function useVehicleSubscription(
   vehicleId: string | null,
-  onLocation: (payload: { latitude: number; longitude: number; speed: number; heading: number; timestamp: string }) => void,
+  onLocation: (payload: LivePosition) => void,
 ): void {
   const accessToken = useAppSelector((s) => s.auth.accessToken);
   const handlerRef = useRef(onLocation);
@@ -192,21 +208,71 @@ export function useVehicleSubscription(
   useEffect(() => {
     if (!accessToken || !vehicleId) return;
 
-    const socket = io({
-      path: '/socket.io',
-      auth: { token: accessToken },
-      transports: ['websocket', 'polling'],
-    });
+    const socket = getLiveSocket();
+    if (!socket) return;
 
-    socket.on('connect', () => socket.emit(WS_EVENTS.SUBSCRIBE_VEHICLE, vehicleId));
-    // Read through the ref so a changing callback does not tear down the socket.
-    socket.on(WS_EVENTS.LOCATION_UPDATE, (payload: Parameters<typeof onLocation>[0]) =>
-      handlerRef.current(payload),
-    );
+    const join = () => socket.emit(WS_EVENTS.SUBSCRIBE_VEHICLE, vehicleId);
+
+    // Join now if already connected, and again after any reconnect — room
+    // membership lives on the server side of a connection and does not survive
+    // one dropping.
+    if (socket.connected) join();
+    socket.on('connect', join);
+
+    const listener = (payload: LivePosition) => {
+      // The room is per vehicle, but a socket may be in several at once.
+      if (!payload.vehicleId || payload.vehicleId === vehicleId) {
+        handlerRef.current(payload);
+      }
+    };
+
+    socket.on(WS_EVENTS.LOCATION_UPDATE, listener);
 
     return () => {
-      socket.removeAllListeners();
-      socket.disconnect();
+      socket.off('connect', join);
+      socket.off(WS_EVENTS.LOCATION_UPDATE, listener);
+      socket.emit(WS_EVENTS.UNSUBSCRIBE, `vehicle:${vehicleId}`);
     };
   }, [accessToken, vehicleId]);
+}
+
+/**
+ * Stream every vehicle in the school — the admin safety dashboard.
+ *
+ * Without this the map only moved for the one bus an operator had selected and
+ * relied on a 20-second poll for the rest, so a fleet view was a fleet of
+ * stale pins. The server authorises the fleet room on `tracking:view` plus a
+ * branch-or-wider scope, so a guardian joining it is refused.
+ *
+ * Positions are collected into a keyed record rather than a list, so a ping
+ * for one bus re-renders one marker instead of the whole fleet.
+ */
+export function useFleetStream(enabled = true): Record<string, LivePosition> {
+  const accessToken = useAppSelector((s) => s.auth.accessToken);
+  const [positions, setPositions] = useState<Record<string, LivePosition>>({});
+
+  useEffect(() => {
+    if (!enabled || !accessToken) return;
+
+    const socket = getLiveSocket();
+    if (!socket) return;
+
+    const join = () => socket.emit(WS_EVENTS.SUBSCRIBE_FLEET);
+    if (socket.connected) join();
+    socket.on('connect', join);
+
+    const listener = (payload: LivePosition) => {
+      if (!payload.vehicleId) return;
+      setPositions((prev) => ({ ...prev, [payload.vehicleId!]: payload }));
+    };
+
+    socket.on(WS_EVENTS.LOCATION_UPDATE, listener);
+
+    return () => {
+      socket.off('connect', join);
+      socket.off(WS_EVENTS.LOCATION_UPDATE, listener);
+    };
+  }, [enabled, accessToken]);
+
+  return positions;
 }

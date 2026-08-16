@@ -10,7 +10,7 @@ import { asyncHandler, ok } from '../../core/http/respond.js';
 import { requireAuth } from '../../core/auth/middleware.js';
 import { scopedRequest, visibleStudentIds } from '../../core/tenancy/scope.js';
 import { prisma } from '../../core/db/prisma.js';
-import { cached, keys } from '../../core/cache/redis.js';
+import { cached, keys } from '../../core/cache/store.js';
 import { percentage } from '@erp/shared';
 
 const router = Router();
