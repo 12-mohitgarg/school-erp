@@ -13,7 +13,8 @@
     "npm": ">=10.0.0"
   },
   "scripts": {
-    "dev": "npm-run-all --parallel dev:api dev:web",
+    "dev": "npm run build --workspace=@erp/shared && npm-run-all --parallel dev:shared dev:api dev:web",
+    "dev:shared": "npm run dev --workspace=@erp/shared",
     "dev:api": "npm run dev --workspace=@erp/api",
     "dev:web": "npm run dev --workspace=@erp/web",
     "build": "npm run build --workspace=@erp/shared && npm run build --workspace=@erp/api && npm run build --workspace=@erp/web",
