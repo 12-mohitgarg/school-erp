@@ -113,7 +113,7 @@ export default function AssignmentsPage() {
         onSubmit={async (values) => {
           // The section picker encodes both ids so one control covers both.
           const [classId, sectionId] = String(values['target']).split(':');
-          const { target, dueAt, ...rest } = values;
+          const { target: _target, dueAt, ...rest } = values;
 
           await createAssignment({
             ...rest,

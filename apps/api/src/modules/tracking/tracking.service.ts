@@ -28,9 +28,7 @@ import { AppError } from '../../core/errors/AppError.js';
 import {
   emitToVehicle,
   emitToFleet,
-  emitToStudent,
   emitToTenant,
-  emitToUsers,
   emitToRole,
 } from '../../core/realtime/socket.js';
 import { notify, guardianUserIds } from '../../core/notifications/notification.service.js';

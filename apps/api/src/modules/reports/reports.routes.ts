@@ -137,7 +137,7 @@ router.get('/library', requirePermission('reports:view'), asyncHandler(async (re
 
 /** Route-wise and vehicle utilisation. */
 router.get('/transport', requirePermission('reports:view'), asyncHandler(async (req, res) => {
-  const { auth, tenant } = scopedRequest(req);
+  const { tenant } = scopedRequest(req);
 
   const routes = await prisma.transportRoute.findMany({
     where: { ...tenant, isActive: true },

@@ -16,7 +16,6 @@ import {
 import { requireAuth, requirePermission } from '../../core/auth/middleware.js';
 import { scopedRequest, assertStudentAccess, studentScopeWhere } from '../../core/tenancy/scope.js';
 import { auditFromRequest } from '../../core/audit/audit.service.js';
-import { AppError } from '../../core/errors/AppError.js';
 import { prisma } from '../../core/db/prisma.js';
 import * as service from './fees.service.js';
 

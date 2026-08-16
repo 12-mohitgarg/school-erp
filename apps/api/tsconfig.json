@@ -15,5 +15,8 @@
   // `prisma/` is excluded from the build: the seed runs through tsx and lives
   // outside rootDir, which the compiler will not accept alongside src/.
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist"]
+  // Tests and their setup are typechecked by `npm run typecheck` (which uses
+  // tsconfig.test.json) but never compiled into dist — shipping them would put
+  // vitest on the production import graph, where it is not a dependency.
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts", "src/test/**"]
 }

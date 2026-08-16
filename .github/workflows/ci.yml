@@ -70,9 +70,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # Enforced, not advisory. It was previously `continue-on-error` because
+      # there was no ESLint config at all, so the step always errored out and
+      # its result was meaningless. With a config in place the errors it finds
+      # are real — two cross-tenant write holes were found this way, both
+      # showing up first as an unused `auth` variable.
       - name: Lint
         run: npm run lint --if-present
-        continue-on-error: true
 
       - name: Test
         run: npm test --if-present

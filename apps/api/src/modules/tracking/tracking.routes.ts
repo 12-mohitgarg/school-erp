@@ -20,7 +20,7 @@ import {
 } from '../../core/http/validate.js';
 import { authenticate, requireAuth, requirePermission } from '../../core/auth/middleware.js';
 import { assertLocationAccess, scopedRequest } from '../../core/tenancy/scope.js';
-import { recordLocationView, auditFromRequest, clientIp } from '../../core/audit/audit.service.js';
+import { recordLocationView, auditFromRequest } from '../../core/audit/audit.service.js';
 import { AppError } from '../../core/errors/AppError.js';
 import { prisma } from '../../core/db/prisma.js';
 import { safeCompare } from '../../core/auth/password.js';
