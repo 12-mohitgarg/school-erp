@@ -159,8 +159,20 @@ router.post(
   asyncHandler(async (req, res) => {
     const auth = requireAuth(req);
 
+    /*
+      Scoped by tenant, not just by id. Updating on the primary key alone let a
+      token from one school lock another school's attendance register — and a
+      locked session cannot be edited, so it is a denial-of-service on someone
+      else's daily attendance.
+    */
+    const existing = await prisma.attendanceSession.findFirst({
+      where: { id: req.params['id']!, tenantId: auth.tenantId },
+      select: { id: true },
+    });
+    if (!existing) throw AppError.notFound('Attendance session');
+
     const session = await prisma.attendanceSession.update({
-      where: { id: req.params['id']! },
+      where: { id: existing.id },
       data: { isLocked: true },
     });
 

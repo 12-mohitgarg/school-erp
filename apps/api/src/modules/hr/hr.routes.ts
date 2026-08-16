@@ -321,6 +321,18 @@ router.post('/salary-structures', requirePermission('hr:create'),
     const body = req.body as { employeeId: string; effectiveFrom: Date; basicSalary: number;
       components: Array<{ type: string; amount: number }> };
 
+    /*
+      The employee id comes from the request body, so it must be proved to
+      belong to the caller's school before anything is written against it.
+      Without this, a token from one school could supersede and rewrite the
+      salary structure of another school's staff — payroll data, cross-tenant.
+    */
+    const employee = await prisma.employee.findFirst({
+      where: { id: body.employeeId, tenantId: auth.tenantId },
+      select: { id: true },
+    });
+    if (!employee) throw AppError.notFound('Employee');
+
     const earnings = body.components.filter((c) => c.type === 'EARNING').reduce((s, c) => s + c.amount, 0);
     const gross = body.basicSalary + earnings;
 

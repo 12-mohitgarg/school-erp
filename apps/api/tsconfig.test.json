@@ -1,0 +1,17 @@
+{
+  // Typecheck everything, tests included. The build config deliberately
+  // excludes them so vitest never lands on the production import graph; this
+  // config exists so excluding them from the build does not also mean nobody
+  // ever typechecks them.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // `rootDir` only constrains emit, and this config emits nothing — but the
+    // compiler still enforces it, so vitest.config.ts (which sits beside
+    // package.json, where vitest expects it) is checked separately by the
+    // editor rather than pulled in here.
+    "rootDir": "."
+  },
+  "include": ["src/**/*.ts", "vitest.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

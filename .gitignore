@@ -11,10 +11,23 @@ out/
 *.tsbuildinfo
 
 # Environment
+#
+# `.env` is ignored everywhere because apps/api/.env holds live secrets: the
+# database URL, the JWT signing secrets, the AES key for the integration
+# credential vault, and the payment/SMS/push provider keys. Committing it would
+# burn all of them permanently, since git history keeps a file even after it is
+# deleted.
 .env
 .env.local
 .env.*.local
 !.env.example
+
+# The web app's env is the deliberate exception. Vite inlines every VITE_
+# variable into the bundle it serves to the browser, so a VITE_ value is public
+# by definition and cannot be a secret — including the Cloudinary cloud name
+# and unsigned upload preset, which the browser needs in order to upload at
+# all. Committing it means a clone builds and uploads with no setup step.
+!apps/web/.env
 
 # Logs
 logs/
@@ -41,12 +54,19 @@ Thumbs.db
 # Prisma
 apps/api/prisma/migrations/dev.db*
 
-# Uploads / local storage
-uploads/
-tmp/
-storage/
+# Uploads / local scratch space
+#
+# Anchored with a leading slash so they match ONLY these directories at the
+# repo root. Unanchored, `storage/` matches a directory of that name at any
+# depth — it was silently excluding apps/api/src/core/storage/, so
+# cloudinary.ts never reached the repo and the API failed to boot elsewhere
+# with "Cannot find module '../../core/storage/cloudinary.js'". Nothing warns
+# you about this: `git add` skips ignored files without comment.
+/uploads/
+/tmp/
+/storage/
 
-# Expo / React Native
+# Expo / React Native — anchored for the same reason.
 .expo/
 .expo-shared/
 *.jks
@@ -54,11 +74,8 @@ storage/
 *.p12
 *.key
 *.mobileprovision
-android/
-ios/
-
-# Docker volumes
-infra/docker/volumes/
+/android/
+/ios/
 
 # Misc
 .turbo/

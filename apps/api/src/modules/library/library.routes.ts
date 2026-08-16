@@ -3,7 +3,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { asyncHandler, ok, created, paginated, pageParams } from '../../core/http/respond.js';
-import { validate, idParam, uuidSchema, listQuery, Validated } from '../../core/http/validate.js';
+import { validate, uuidSchema, listQuery, Validated } from '../../core/http/validate.js';
 import { requireAuth, requirePermission } from '../../core/auth/middleware.js';
 import { scopedRequest, resolveWriteBranch, studentScopeWhere } from '../../core/tenancy/scope.js';
 import { auditFromRequest } from '../../core/audit/audit.service.js';
