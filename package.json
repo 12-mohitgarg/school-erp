@@ -6,6 +6,7 @@
   "workspaces": [
     "apps/api",
     "apps/web",
+    "apps/mobile",
     "packages/*"
   ],
   "engines": {
@@ -17,6 +18,7 @@
     "dev:shared": "npm run dev --workspace=@erp/shared",
     "dev:api": "npm run dev --workspace=@erp/api",
     "dev:web": "npm run dev --workspace=@erp/web",
+    "dev:mobile": "npm run start --workspace=@erp/mobile",
     "build": "npm run build --workspace=@erp/shared && npm run build --workspace=@erp/api && npm run build --workspace=@erp/web",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",

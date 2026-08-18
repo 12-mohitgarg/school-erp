@@ -1,0 +1,196 @@
+/**
+ * Expo app configuration.
+ *
+ * One codebase ships three products. `APP_VARIANT` selects which one this
+ * build is: `parent`, `student`, `driver`, or `all` (the default — every role
+ * in one binary, which is what you want during development and for a single
+ * store listing).
+ *
+ * The variant changes the bundle id, display name, icon tint and — importantly
+ * — which native permissions the binary declares. A parent's phone should
+ * never ship a background-location entitlement it has no use for, and app
+ * stores reject binaries that ask for more than they demonstrably need.
+ */
+
+import type { ConfigContext, ExpoConfig } from 'expo/config';
+
+type Variant = 'parent' | 'student' | 'driver' | 'all';
+
+const VARIANT = (process.env['APP_VARIANT'] ?? 'all') as Variant;
+
+interface VariantProfile {
+  name: string;
+  slug: string;
+  scheme: string;
+  bundleId: string;
+  /** Accent used for the adaptive icon background and the splash. */
+  tint: string;
+  /** Only the driver build broadcasts position while backgrounded. */
+  backgroundLocation: boolean;
+}
+
+const PROFILES: Record<Variant, VariantProfile> = {
+  all: {
+    name: 'EduSphere',
+    slug: 'edusphere',
+    scheme: 'edusphere',
+    bundleId: 'io.edusphere.app',
+    tint: '#6366F1',
+    backgroundLocation: true,
+  },
+  parent: {
+    name: 'EduSphere Parent',
+    slug: 'edusphere-parent',
+    scheme: 'edusphere-parent',
+    bundleId: 'io.edusphere.parent',
+    tint: '#6366F1',
+    backgroundLocation: false,
+  },
+  student: {
+    name: 'EduSphere Student',
+    slug: 'edusphere-student',
+    scheme: 'edusphere-student',
+    bundleId: 'io.edusphere.student',
+    tint: '#0284C7',
+    backgroundLocation: false,
+  },
+  driver: {
+    name: 'EduSphere Driver',
+    slug: 'edusphere-driver',
+    scheme: 'edusphere-driver',
+    bundleId: 'io.edusphere.driver',
+    tint: '#0F766E',
+    backgroundLocation: true,
+  },
+};
+
+const profile = PROFILES[VARIANT];
+
+/**
+ * Location strings are read aloud in the iOS permission sheet and are the
+ * single biggest factor in whether a parent grants it. They say what the app
+ * does with the data and who can see it, because PRD §6.3 requires transparent
+ * disclosure at the point of consent — not buried in a policy document.
+ */
+const LOCATION_WHEN_IN_USE =
+  "EduSphere shows your child's school bus on a live map while you have the app open.";
+
+const LOCATION_ALWAYS =
+  'The driver app reports the bus position every few seconds during a trip so that ' +
+  'parents and the school office can see the bus in real time. It reports only ' +
+  'while a trip is running, and stops the moment the trip ends.';
+
+export default ({ config }: ConfigContext): ExpoConfig => ({
+  ...config,
+  name: profile.name,
+  slug: profile.slug,
+  scheme: profile.scheme,
+  version: '1.0.0',
+  orientation: 'portrait',
+  userInterfaceStyle: 'automatic',
+  primaryColor: profile.tint,
+
+  /**
+   * Mobile only, deliberately.
+   *
+   * The web surface of this product is `apps/web`, which is a different
+   * application for different roles. Leaving web enabled here means Metro
+   * offers a `w` key that can only ever fail: `react-native-web` is not
+   * installed, and even with it the live map (MapLibre), background location
+   * and push all have no web implementation.
+   *
+   * Declaring the platforms removes the option rather than letting someone
+   * discover it as a stack trace.
+   */
+  platforms: ['ios', 'android'],
+
+  // The splash is configured through the `expo-splash-screen` plugin below —
+  // the top-level `splash` key was removed in SDK 57. No image asset is used:
+  // a solid brand ground keeps the first frame instant and means no binary
+  // has to be checked into the repo.
+
+  assetBundlePatterns: ['**/*'],
+
+  ios: {
+    bundleIdentifier: profile.bundleId,
+    supportsTablet: true,
+    // A missed SOS or geofence alert is a safety failure, so the app is
+    // allowed to wake for a silent push and for location events.
+    infoPlist: {
+      NSLocationWhenInUseUsageDescription: LOCATION_WHEN_IN_USE,
+      ...(profile.backgroundLocation
+        ? {
+            NSLocationAlwaysAndWhenInUseUsageDescription: LOCATION_ALWAYS,
+            UIBackgroundModes: ['location', 'fetch', 'remote-notification'],
+          }
+        : { UIBackgroundModes: ['remote-notification'] }),
+      // No camera or photo-library keys: attachments go through the document
+      // picker, which reads a file the user explicitly chose and needs neither.
+      ITSAppUsesNonExemptEncryption: false,
+    },
+  },
+
+  android: {
+    package: profile.bundleId,
+    adaptiveIcon: { backgroundColor: profile.tint },
+    permissions: [
+      'ACCESS_COARSE_LOCATION',
+      'ACCESS_FINE_LOCATION',
+      'POST_NOTIFICATIONS',
+      'VIBRATE',
+      ...(profile.backgroundLocation
+        ? ['ACCESS_BACKGROUND_LOCATION', 'FOREGROUND_SERVICE', 'FOREGROUND_SERVICE_LOCATION']
+        : []),
+    ],
+  },
+
+  plugins: [
+    // Required peer of `expo` itself since SDK 57, even though this app uses
+    // only system fonts — the module has to be linked natively.
+    'expo-font',
+    'expo-secure-store',
+    [
+      'expo-notifications',
+      {
+        color: profile.tint,
+        // An SOS must be audible even when the phone is on a normal profile.
+        defaultChannel: 'default',
+      },
+    ],
+    [
+      'expo-location',
+      {
+        locationWhenInUsePermission: LOCATION_WHEN_IN_USE,
+        ...(profile.backgroundLocation
+          ? {
+              locationAlwaysAndWhenInUsePermission: LOCATION_ALWAYS,
+              isAndroidBackgroundLocationEnabled: true,
+              isAndroidForegroundServiceEnabled: true,
+            }
+          : {}),
+      },
+    ],
+    [
+      'expo-splash-screen',
+      {
+        backgroundColor: profile.tint,
+        dark: { backgroundColor: '#090C17' },
+      },
+    ],
+  ],
+
+  extra: {
+    variant: VARIANT,
+    /**
+     * Read at runtime by `src/config/env.ts`. Set these in `.env` (dev) or as
+     * EAS build secrets — never hard-coded, so one binary recipe serves
+     * staging and production.
+     */
+    apiUrl: process.env['EXPO_PUBLIC_API_URL'] ?? 'http://localhost:4000/api/v1',
+    wsUrl: process.env['EXPO_PUBLIC_WS_URL'] ?? 'http://localhost:4000',
+    wsPath: process.env['EXPO_PUBLIC_WS_PATH'] ?? '/socket.io',
+    eas: { projectId: process.env['EAS_PROJECT_ID'] },
+  },
+
+  experiments: { typedRoutes: false },
+});

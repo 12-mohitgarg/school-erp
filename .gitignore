@@ -77,6 +77,12 @@ apps/api/prisma/migrations/dev.db*
 /android/
 /ios/
 
+# `expo prebuild` regenerates these from app.config.ts, so they are build
+# output rather than source. Anchored to the mobile workspace.
+/apps/mobile/android/
+/apps/mobile/ios/
+/apps/mobile/.expo-export*/
+
 # Misc
 .turbo/
 .cache/

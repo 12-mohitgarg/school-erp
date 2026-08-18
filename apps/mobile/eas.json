@@ -1,0 +1,56 @@
+{
+  "cli": {
+    "version": ">= 12.0.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "base": {
+      "node": "20.18.0",
+      "env": {
+        "EXPO_PUBLIC_WS_PATH": "/socket.io"
+      }
+    },
+    "development": {
+      "extends": "base",
+      "developmentClient": true,
+      "distribution": "internal",
+      "env": {
+        "//": "Left as localhost on purpose. src/config/env.ts rewrites it at runtime to the LAN address Metro served the bundle from, or 10.0.2.2 on the Android emulator - so one dev build works on both a handset and an emulator. Hard-coding 10.0.2.2 here would break every physical device.",
+        "EXPO_PUBLIC_API_URL": "http://localhost:4000/api/v1",
+        "EXPO_PUBLIC_WS_URL": "http://localhost:4000"
+      }
+    },
+    "preview": {
+      "extends": "base",
+      "distribution": "internal",
+      "android": { "buildType": "apk" },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://staging.edusphere.io/api/v1",
+        "EXPO_PUBLIC_WS_URL": "https://staging.edusphere.io"
+      }
+    },
+    "production": {
+      "extends": "base",
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://api.edusphere.io/api/v1",
+        "EXPO_PUBLIC_WS_URL": "https://api.edusphere.io"
+      }
+    },
+    "production-parent": {
+      "extends": "production",
+      "env": { "APP_VARIANT": "parent" }
+    },
+    "production-student": {
+      "extends": "production",
+      "env": { "APP_VARIANT": "student" }
+    },
+    "production-driver": {
+      "extends": "production",
+      "env": { "APP_VARIANT": "driver" }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

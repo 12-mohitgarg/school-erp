@@ -69,6 +69,36 @@
     },
     {
       "files": [
+        "apps/mobile/**/*.{ts,tsx}"
+      ],
+      "plugins": [
+        "react-hooks"
+      ],
+      "env": {
+        "browser": false,
+        "node": false,
+        "es2022": true
+      },
+      "globals": {
+        "__DEV__": "readonly",
+        "console": "readonly",
+        "fetch": "readonly",
+        "FormData": "readonly",
+        "XMLHttpRequest": "readonly",
+        "AbortController": "readonly",
+        "setTimeout": "readonly",
+        "clearTimeout": "readonly",
+        "setInterval": "readonly",
+        "clearInterval": "readonly",
+        "GeoJSON": "readonly"
+      },
+      "rules": {
+        "react-hooks/rules-of-hooks": "error",
+        "react-hooks/exhaustive-deps": "warn"
+      }
+    },
+    {
+      "files": [
         "**/*.test.ts",
         "**/*.spec.ts",
         "**/test/**"

@@ -23,7 +23,14 @@ npm run dev:api
 
 # Terminal 2 — web on :5173
 npm run dev:web
+
+# Terminal 3 (optional) — Metro, for the Parent/Student/Driver apps
+npm run dev:mobile
 ```
+
+The mobile apps need a **development build** rather than Expo Go (MapLibre and
+background location are native modules) — see
+[apps/mobile/README.md](apps/mobile/README.md) for the one-time setup.
 
 Open **http://localhost:5173**. Password for every demo account is `Password@123`:
 
@@ -200,6 +207,43 @@ Wired in at: student documents (upload, verify, delete), school logo, and a reus
 
 ---
 
+## Mobile apps — Parent · Student · Driver
+
+The three apps the PRD specifies (§2.5, §2.4, §2.8), in `apps/mobile`. Full detail in
+[apps/mobile/README.md](apps/mobile/README.md); the short version:
+
+**One Expo codebase, three products.** The signed-in role selects one of three separate
+navigation trees. Each role has its own param list, so a driver's build cannot navigate to
+a fee screen — TypeScript refuses to compile it. `APP_VARIANT=parent|student|driver`
+produces a separate branded binary with its own bundle id **and its own permission set**:
+the parent build genuinely ships without the background-location entitlement the driver
+build needs.
+
+**No new API surface.** The backend was already mobile-ready — `push.channel.ts` targets
+Expo's push service, `/auth/refresh` accepts a body token "for mobile clients",
+`/auth/push-tokens` and `/auth/consent` exist, and `/tracking/location/batch` was written
+for exactly this offline queue. Design tokens are the same values as the web app's CSS
+variables, so the two surfaces are visibly one product.
+
+| App | Answers |
+|---|---|
+| **Parent** | Where is the bus (live map, ETA to *my* stop, boarding alerts) · attendance · results · homework · fees · teacher chat · 30-day trip history · SOS |
+| **Student** | What is on now and next · timetable · homework with submission · results · attendance · library · calendar |
+| **Driver** | Start/end trip · route and stops · boarding & de-boarding list · GPS broadcast every 12s · SOS |
+
+**Offline is a first-class state, not an error.** Position pings and boarding scans are
+written to disk before they are sent, and flushed as a batch on reconnect — pings in
+chronological order so geofence transitions still fire in sequence, boarding events one at
+a time because the server's upsert makes each retry idempotent. The driver's screen shows
+the pending count and a **Sync now** button; queued work is never silent.
+
+**The live map says whether it is actually live.** A map that has silently stopped
+updating looks identical to a bus that has stopped moving, so the connection state and the
+age of the last ping are on screen at all times, and past 90 seconds it says the tracker
+has gone quiet rather than showing a stale position as current.
+
+---
+
 ## Loading states
 
 Every waiting screen shows the *shape* of what is coming, never a spinner and never the
@@ -246,6 +290,11 @@ apps/
   web/                 React + TypeScript + Redux Toolkit + Tailwind
     src/components/    Design system, app shell, charts, skeletons, uploads
     src/features/      One folder per panel area, plus platform/
+  mobile/              Expo + React Native. Parent, Student and Driver apps.
+    src/core/          api · auth · realtime · offline queue · push · storage
+    src/design/        Tokens mirrored from the web app, 14 components
+    src/features/      Screens shared between roles (map, chat, fees, …)
+    src/apps/          One folder per role-specific experience
 packages/
   shared/              RBAC matrix, domain enums, API contracts, geo/grading helpers
 infra/
@@ -269,6 +318,7 @@ infra/
 | Layer | Technology |
 |---|---|
 | Web | React 18, TypeScript, Redux Toolkit + RTK Query, Tailwind CSS, Vite |
+| Mobile | Expo SDK 57, React Native, React Navigation, TanStack Query, MapLibre |
 | Backend | Node.js, Express, TypeScript (REST + WebSocket) |
 | Database | PostgreSQL + PostGIS, via Prisma |
 | Cache & live buffer | In-process store (`core/cache/store.ts`) |
@@ -341,7 +391,11 @@ than a reset.
 
 ## Verified
 
-`npm run typecheck` and `npm run build` pass clean across API, web and shared.
+`npm run typecheck` and `npm run build` pass clean across API, web, mobile and shared, and
+`npm test` passes 60/60. The mobile app additionally bundles for both platforms
+(`expo export`, 3.9MB Hermes bytecode each) and passes `expo-doctor` 20/21 — the one
+failure being the two Reacts this monorepo deliberately contains, 18 for the web app and
+19 for the mobile one, which `metro.config.js` pins explicitly.
 
 Exercised against the live database:
 
@@ -361,8 +415,9 @@ Exercised against the live database:
 
 ## Remaining work
 
-1. Automated test suite — unit, integration, and a load test for GPS ingestion at peak.
-   The checks above are manual scripts, not a committed suite.
+1. Automated test suite — integration coverage and a load test for GPS ingestion at peak.
+   60 unit tests exist for the cache, storage and tenancy-scope layers; the end-to-end
+   checks above are manual scripts, not a committed suite. The mobile apps have no tests.
 2. Kubernetes manifests. CI exists; container images do not.
-3. Mobile apps (Parent, Student, Driver) — descoped by the client, web only. The APIs and
-   WebSocket contracts they need are all present.
+3. Mobile apps have not been run on a physical device or against a live GPS trip — both
+   need a development build and a school's real data.
