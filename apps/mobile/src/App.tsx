@@ -9,11 +9,17 @@
  * token; Network sits inside Auth so the offline queue only flushes for a
  * signed-in session; and Navigation is innermost so its theme comes from ours
  * rather than React Navigation's defaults.
+ *
+ * No `GestureHandlerRootView`: React Navigation 7 does not require
+ * react-native-gesture-handler (only `react-native-screens` and
+ * `react-native-safe-area-context`), and nothing here uses a gesture API. It
+ * was a defensive dependency whose native code failed to link against NDK 27
+ * with a wall of `undefined symbol: operator delete` errors — so it is gone
+ * rather than worked around. Add it back only alongside an actual gesture.
  */
 
 import { useCallback, useEffect, useRef } from 'react';
 import { StyleSheet, View } from 'react-native';
-import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { NavigationContainer, type NavigationContainerRef } from '@react-navigation/native';
 import { QueryClientProvider } from '@tanstack/react-query';
@@ -34,7 +40,7 @@ void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
 export default function App() {
   return (
-    <GestureHandlerRootView style={styles.root}>
+    <View style={styles.root}>
       <SafeAreaProvider>
         <ThemeProvider>
           <ErrorBoundary>
@@ -50,7 +56,7 @@ export default function App() {
           </ErrorBoundary>
         </ThemeProvider>
       </SafeAreaProvider>
-    </GestureHandlerRootView>
+    </View>
   );
 }
 

@@ -89,6 +89,85 @@ host argument), so nothing needs changing server-side.
 > equivalent is `npm start` — though `npm run dev` and `npm run dev:mobile` are
 > aliased here too, so either directory works.
 
+#### Or build a standalone APK to hand someone
+
+A development build still needs Metro running on your machine. To get a single
+file that installs and runs on its own — for a tester, or a demo with no laptop
+attached — build a signed release APK locally:
+
+```bash
+cd apps/mobile
+npm run apk                 # detects this machine's LAN IP and bakes it in
+npm run apk:install         # adb install -r ... (or copy the APK to the phone)
+```
+
+The APK lands at `android/app/build/outputs/apk/release/app-release.apk`.
+
+Two details that a release build gets wrong if you just run `assembleRelease`
+by hand, both of which `scripts/build-apk.mjs` handles:
+
+- **The API URL is compiled in.** `src/config/env.ts` rewrites `localhost` to
+  the packager's LAN address only while `__DEV__` is true, and a release binary
+  is never `__DEV__`. Left alone it would resolve `localhost` to *the phone*,
+  and every request would fail. The script detects the LAN address — skipping
+  virtual adapters, which is the usual cause of a hand-typed IP not working —
+  and bakes it into the bundle.
+- **Android blocks cleartext HTTP** from API 28 up. The exemption lives in
+  `android/app/src/debug/AndroidManifest.xml` and does not apply to a release
+  binary, so plain-HTTP calls to a LAN address fail with a bare network error.
+  Setting `EXPO_PUBLIC_ALLOW_CLEARTEXT=true` turns on the `expo-build-properties`
+  opt-in in `app.config.ts`. It is opt-in precisely so a store build, which
+  talks https, keeps the protection.
+
+Point it somewhere else — a staging server, over https, with no cleartext
+exemption — with `--api-url`, and pick a single-role binary with `--variant`:
+
+```bash
+node scripts/build-apk.mjs --api-url https://staging.edusphere.io/api/v1
+node scripts/build-apk.mjs --variant driver
+```
+
+##### If the native build fails to link
+
+A Windows username with a space in it (`C:\Users\firstname lastname\...`) breaks
+the Android NDK. The default SDK location is under the user profile, so this is
+easy to hit, and the error does not look like what it is: everything compiles,
+then every native module fails at the link step with hundreds of undefined
+`operator new`, `__cxa_*` and `std::__ndk1::*` symbols, ending in
+`CLANG_~1: error: linker command failed`.
+
+Nothing is wrong with React Native or with the NDK install. CMake invokes the
+compiler through its 8.3 short path — `clang++.exe` becomes `CLANG_~1.EXE`,
+because `+` is not a legal short-name character — and the driver then fails to
+add libc++ to the link. A three-line CMake project reproduces it with no React
+Native involved at all.
+
+`scripts/build-apk.mjs` handles this: it points `ANDROID_HOME` at a directory
+junction (`C:\AndroidSdk`) whenever the real path contains a space. A junction
+needs no administrator rights and no extra disk. If you build with
+`npx expo run:android` or Android Studio instead, create it once yourself and
+point `ANDROID_HOME` at it:
+
+```powershell
+mklink /J C:\AndroidSdk "$env:LOCALAPPDATA\Android\Sdk"
+```
+
+CMake bakes absolute toolchain paths into each module's `.cxx/` directory, so
+after changing the SDK path delete those caches — otherwise the stale configure
+keeps failing:
+
+```powershell
+Remove-Item -Recurse -Force node_modules\react-native-screens\android\.cxx, `
+  node_modules\expo\node_modules\expo-modules-core\android\.cxx -ErrorAction SilentlyContinue
+```
+
+Signing uses `credentials/edusphere-release.keystore`, which is **gitignored**:
+it is the app's identity, and anything signed with it installs over a user's
+copy as a legitimate update. Generate one on a new machine with the `keytool`
+command the script prints when it is missing, and back it up somewhere that is
+not this repo — losing it means never being able to update a published listing
+again. For a store release, use EAS-managed credentials instead.
+
 ---
 
 ## One codebase, three products

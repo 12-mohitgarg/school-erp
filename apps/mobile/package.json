@@ -2,7 +2,7 @@
   "name": "@erp/mobile",
   "version": "1.0.0",
   "private": true,
-  "description": "EduSphere School ERP \u2014 Parent, Student and Driver mobile apps (Expo / React Native)",
+  "description": "EduSphere School ERP — Parent, Student and Driver mobile apps (Expo / React Native)",
   "main": "index.js",
   "expo": {
     "install": {
@@ -25,6 +25,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts,.tsx",
     "doctor": "npx expo-doctor",
+    "apk": "node scripts/build-apk.mjs",
+    "apk:install": "adb install -r android/app/build/outputs/apk/release/app-release.apk",
     "build:android": "eas build --platform android --profile production",
     "build:ios": "eas build --platform ios --profile production"
   },
@@ -41,6 +43,7 @@
     "date-fns": "^4.4.0",
     "expo": "~57.0.14",
     "expo-application": "~57.0.2",
+    "expo-build-properties": "~57.0.13",
     "expo-constants": "~57.0.12",
     "expo-device": "~57.0.1",
     "expo-document-picker": "~57.0.1",
@@ -57,7 +60,6 @@
     "expo-task-manager": "~57.0.11",
     "react": "19.2.3",
     "react-native": "0.86.2",
-    "react-native-gesture-handler": "~2.32.0",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0",
     "react-native-svg": "15.15.4",
